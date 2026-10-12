@@ -230,7 +230,7 @@ export default function Inbox() {
       <div><div className="welcome-eyebrow"><span /> WORK, WITH CONTEXT</div><h1>消息有来处，<br />工作有下一步。</h1><p>把项目需求、期限与待确认事项放在一起，回复前先看清原文与目标。</p></div>
       <span className="badge simulation inbox-mode-badge">合成数据 · 模拟收件箱</span>
     </header>
-    <div className="inbox-scope"><ShieldCheck size={17} /><p>当前仅使用固定合成数据与规则整理。真实微信未接入；不保障实时或锁屏接收。QQ 暂不接入。</p></div>
+    <div className="inbox-scope"><ShieldCheck size={17} /><p>当前仅使用固定合成数据与规则整理。真实微信未接入；不保障实时或锁屏接收。</p></div>
     {readError && <div className="inbox-error" role="alert"><TriangleAlert size={16} /><span>收件箱暂未更新：{readError}</span><button onClick={() => void refresh()} disabled={refreshing}>重试读取</button></div>}
     {error && <div className="inbox-error" role="alert"><TriangleAlert size={16} /><span>{error}</span><button aria-label="关闭收件箱提示" onClick={() => setError('')}><X size={16} /></button></div>}
     {!snapshot ? <div className="inbox-loading"><LoaderCircle size={24} className="spin" /><p>正在读取本地模拟收件箱…</p></div> : !snapshot.threads.length ? <div className="inbox-empty"><span className="inbox-empty-icon"><InboxIcon size={35} strokeWidth={1.3} /></span><div className="section-label">从一组演示消息开始</div><h2>让工作消息，变得有条理。</h2><p>显式载入合成消息，体验项目整理、原文追溯<br />与回复预览。不会读取或发送真实微信消息。</p><button className="primary-button" data-testid="inbox-load-demo" disabled={!!busy} onClick={() => void loadDemo()}>{busy === 'load' ? <LoaderCircle size={16} className="spin" /> : <Sparkles size={16} />}载入合成演示<ArrowRight size={15} /></button></div> : <>

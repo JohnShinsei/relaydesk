@@ -51,7 +51,9 @@ CLI 进程环境采用明确白名单，排除 API key、provider endpoint 覆�
 
 单项开关来源：[配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)、[官方配置 schema](https://learn.chatgpt.com/docs/config-schema.json)。配置存在多层，受管理要求可以约束命令行覆盖；遇到冲突应报错而非放宽。来源：[配置优先级](https://learn.chatgpt.com/docs/config-file/config-basic)。Hooks 的全局开关为 `features.hooks=false`，但管理员可以强制启用；不使用跳过 hook 信任的危险参数。来源：[Hooks](https://learn.chatgpt.com/docs/hooks)。
 
-## App Server 的后续路线
+## App Server：早期调研与后续实现
+
+下面保留旧 exec 阶段的协议调研背景。当前 0.162.1 原生驱动、逐项审批和恢复的实现说明见 [App Server 驱动](native-driver.md)，真实验收见 [验证记录](verification.md)；旧 exec 隔离选项不直接复用于原生驱动。
 
 此前通过 `0.142.2 app-server generate-json-schema --experimental --out <临时目录>` 生成的 `v2/ThreadStartParams.json` 和 `v2/TurnStartParams.json` 均包含 `environments`：空数组明确关闭环境访问。它是线程/轮次协议字段；没有证据表明 `exec -c 'environments=[]'` 有效。后续接入新版 app-server 前仍须重新核验对应版本的 schema；若使用该字段，应在每轮保持空环境，不允许前端覆盖。
 

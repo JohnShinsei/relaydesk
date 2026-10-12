@@ -105,8 +105,8 @@ export function createCodexAdapter(options: CodexOptions): ExecutionAdapter {
   let executing = false;
   return {
     info: {
-      id: 'codex', name: 'Codex CLI', kind: 'cli', available: true,
-      description: '已配置官方 CLI 的受限只读对话；实际可用性取决于当前 ChatGPT 登录、模型权限及账户额度。',
+      id: 'codex', name: 'Codex exec · 旧模式', kind: 'cli', available: true,
+      description: '旧版 exec 文本适配器：受限只读对话，不支持原生审批或线程恢复；实际可用性取决于登录、模型权限及账户额度。',
     },
     async execute({ task, history, signal, emit }) {
       if (unconfirmedStop) throw new Error('此前 Codex 进程未能确认停止，已暂停此适配器；请检查本地进程后重启服务。');

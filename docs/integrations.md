@@ -41,12 +41,11 @@ Anthropic 当前规则区分原生 CLI 托管与第三方自有认证代理：�
 | 渠道 | 可核验的接入方式 | 当前范围 |
 | --- | --- | --- |
 | 微信 | OpenClaw 官方文档声明外部 `@tencent-weixin/openclaw-weixin` 插件由 Tencent Weixin 团队维护，使用 iLink；插件能力只声明直聊和媒体，未声明群聊。 | 候选机器人入口；不是“读取个人微信所有会话”的证据。尚未安装或扫码，腾讯发布页未独立核验。OpenClaw 文档记录插件 2.4.8 的配对/撤销限制，试接前必须复查修复版本与发送者校验。 |
-| QQ | 腾讯机器人平台提供 API/webhook，面向频道、群与单聊；主体类型、沙箱、审核与使用范围影响可用能力。 | 仅保留既往调研，本轮 QQ 暂不接入。该路线可用于正式机器人连接器，不等于登录个人 QQ 接管所有聊天；尚未创建机器人或申请权限。 |
 | Slack | Events API；Socket Mode 可通过 WebSocket 收事件，不需公开 HTTP 回调。官方 Bolt/SDK 可处理连接细节。`message.channels` 需要 `channels:history`，只看提及可使用 `app_mention`。 | 优先采用最小范围读取、指定频道/发送者；需用户批准创建/安装 app、授权和令牌。首版不申请 `chat:write`，不发送消息。 |
 | Gmail | `watch` + Cloud Pub/Sub 接收变化提示，再通过 `history.list`/邮件读取补取内容；watch 至少每 7 天续订。 | 未来只读连接器；先确认邮箱供应商和 OAuth。`gmail.readonly` 属于 restricted scope，服务端处理需评估相应验证要求，不默认申请发送/删除能力。 |
 | Outlook | Microsoft Graph 可订阅邮件变化；读取正文需要相应读取权限，订阅需要续期及丢失通知恢复。 | 未来采用用户委托的最小读取权限，按选定邮箱/文件夹接入，不默认申请全租户权限。 |
 
-来源：[OpenClaw 微信通道](https://docs.openclaw.ai/channels/wechat)、[QQ 官方接入指南](https://bot.q.qq.com/wiki/)、[Slack Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/)、[Slack 消息事件](https://docs.slack.dev/reference/events/message.channels/)、[Gmail 推送](https://developers.google.com/workspace/gmail/api/guides/push)、[Gmail 权限](https://developers.google.com/workspace/gmail/api/auth/scopes)、[Outlook 通知](https://learn.microsoft.com/en-us/graph/outlook-change-notifications-overview)。
+来源：[OpenClaw 微信通道](https://docs.openclaw.ai/channels/wechat)、[Slack Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/)、[Slack 消息事件](https://docs.slack.dev/reference/events/message.channels/)、[Gmail 推送](https://developers.google.com/workspace/gmail/api/guides/push)、[Gmail 权限](https://developers.google.com/workspace/gmail/api/auth/scopes)、[Outlook 通知](https://learn.microsoft.com/en-us/graph/outlook-change-notifications-overview)。
 
 微信公众号接收消息与企业微信会话存档是需要分别核实的其他路线。本次网页抓取未能取得对应腾讯文档正文，不将其权限、费用或对个人微信的覆盖范围写成已验证结论。待具体选定账户类型后再核验；本轮仅保留连接器边界。[公众号文档入口](https://developers.weixin.qq.com/doc/offiaccount/Message_Management/Receiving_standard_messages.html)、[企业微信文档入口](https://developer.work.weixin.qq.com/document/path/91774)
 

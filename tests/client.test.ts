@@ -4,7 +4,7 @@ import { act, createElement } from 'react';
 import type { Root } from 'react-dom/client';
 import { JSDOM } from 'jsdom';
 import App from '../client/App.tsx';
-import type { AdapterId, Bootstrap, Session, Task, TaskStatus } from '../shared/types.ts';
+import type { AdapterId, Bootstrap, NativeApproval, NativeApprovalDecision, Session, Task, TaskStatus } from '../shared/types.ts';
 
 const timestamp = '2026-10-12T12:00:00.000Z';
 const bootstrap: Bootstrap = {
@@ -22,7 +22,32 @@ function makeSession(id: string, title = id, adapterId: AdapterId = 'mock-codex'
   return { id, title, adapterId, createdAt: timestamp, updatedAt: timestamp, messages: [], tasks: [] };
 }
 
-async function mount(options: { sessions?: Session[]; selected?: string; deferredId?: string; bootstrap?: Bootstrap } = {}) {
+const nativeBootstrap: Bootstrap = {
+  ...bootstrap,
+  adapters: [...bootstrap.adapters, { id: 'codex-app-server', name: 'Codex AppServer', description: '原生审批测试夹具', available: true, kind: 'cli' }],
+};
+
+function makeNativeSession(id: string, approvalOverrides: Partial<NativeApproval> = {}): Session {
+  const session = makeSession(id, `原生会话 ${id}`, 'codex-app-server');
+  session.engineBinding = { driverId: 'codex-app-server', threadId: `thread-${id}`, workspace: '/workspace/relaydesk', version: '0.162.1' };
+  const approval: NativeApproval = {
+    id: `approval-${id}`, kind: 'command', requestId: 42, threadId: `thread-${id}`, turnId: `turn-${id}`, itemId: `item-${id}`,
+    operation: 'Run project verification', cwd: '/workspace/relaydesk', allowedDecisions: ['accept', 'decline', 'cancel'],
+    status: 'pending', createdAt: timestamp, expiresAt: '2099-01-01T00:00:00.000Z', ...approvalOverrides,
+  };
+  session.tasks.push({
+    id: `task-${id}`, sessionId: id, adapterId: 'codex-app-server', prompt: '检查项目状态，不重复发送这个提示词', mode: 'chat',
+    status: 'awaiting_approval', createdAt: timestamp, updatedAt: timestamp, nativeTurnId: `turn-${id}`, nativeApprovals: [approval],
+    events: [{ status: 'awaiting_approval', at: timestamp, detail: '原生执行等待审批' }],
+  });
+  session.messages.push({ id: `message-${id}`, role: 'user', content: session.tasks[0].prompt, createdAt: timestamp, taskId: session.tasks[0].id });
+  return session;
+}
+
+async function mount(options: {
+  sessions?: Session[]; selected?: string; deferredId?: string; bootstrap?: Bootstrap;
+  nativeDecision?: 'deferred' | 'drop-response'; recoveredSession?: Session;
+} = {}) {
   const dom = new JSDOM('<!doctype html><div id="root"></div>', { url: 'http://127.0.0.1:4317/' });
   const saved = new Map<string, PropertyDescriptor | undefined>();
   const globals: Record<string, unknown> = {
@@ -34,6 +59,7 @@ async function mount(options: { sessions?: Session[]; selected?: string; deferre
   const requests: { path: string; method: string; body: Record<string, unknown> }[] = [];
   const sources: FakeEventSource[] = [];
   let resolveDeferred: ((response: Response) => void) | undefined;
+  let resolveNativeDecision: (() => void) | undefined;
   let root: Root | undefined;
   let taskCounter = 0;
   const response = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } });
@@ -80,6 +106,13 @@ async function mount(options: { sessions?: Session[]; selected?: string; deferre
       sessions.set(session.id, session);
       return response({ session }, 201);
     }
+    const recovery = /^\/api\/sessions\/([^/]+)\/recover$/.exec(path);
+    if (recovery && method === 'POST') {
+      if (!options.recoveredSession || options.recoveredSession.id !== recovery[1]) return response({ error: '未配置恢复结果' }, 409);
+      const session = structuredClone(options.recoveredSession);
+      sessions.set(session.id, session);
+      return response({ session });
+    }
     const match = /^\/api\/sessions\/([^/]+)(\/tasks)?$/.exec(path);
     if (match) {
       if (method === 'GET' && match[1] === options.deferredId) {
@@ -95,6 +128,23 @@ async function mount(options: { sessions?: Session[]; selected?: string; deferre
         session.title = task.prompt;
         publish(session);
         return response({ task }, 202);
+      }
+    }
+    const nativeAction = /^\/api\/tasks\/([^/]+)\/native-approvals\/([^/]+)$/.exec(path);
+    if (nativeAction && method === 'POST') {
+      for (const session of sessions.values()) {
+        const task = session.tasks.find((item) => item.id === nativeAction[1]);
+        const approval = task?.nativeApprovals?.find((item) => item.id === nativeAction[2]);
+        if (!approval) continue;
+        if (options.nativeDecision === 'drop-response') throw new TypeError('网络中断，审批结果未知');
+        const decide = () => {
+          approval.decision = body.decision as NativeApprovalDecision;
+          approval.status = body.decision === 'accept' ? 'accepted' : body.decision === 'decline' ? 'declined' : 'cancelled';
+          approval.decidedAt = timestamp;
+          return response({ session });
+        };
+        if (options.nativeDecision === 'deferred') return new Promise<Response>((resolve) => { resolveNativeDecision = () => resolve(decide()); });
+        return decide();
       }
     }
     const action = /^\/api\/tasks\/([^/]+)\/(approve|cancel)$/.exec(path);
@@ -146,6 +196,7 @@ async function mount(options: { sessions?: Session[]; selected?: string; deferre
       await act(async () => publish(session)); await flush();
     },
     async resolveGet(session: Session) { await act(async () => resolveDeferred?.(response({ session }))); await flush(); },
+    async resolveNativeDecision() { await act(async () => resolveNativeDecision?.()); await flush(); },
     async cleanup() {
       await act(async () => root?.unmount());
       dom.window.close();
@@ -264,8 +315,8 @@ test('React DOM: configured real Codex selects CLI, blocks approval demo and wai
     await ui.click('[data-testid="approval-demo"]');
     assert.equal(ui.query('[data-testid="approval-demo"]').getAttribute('aria-pressed'), 'true');
     await ui.click('[data-adapter-id="codex"]');
-    assert.match(ui.query('[data-adapter-id="codex"]').textContent ?? '', /Codex · CLI/);
-    assert.equal(ui.query('[data-testid="adapter-mode"]').textContent, '真实 · 只读');
+    assert.match(ui.query('[data-adapter-id="codex"]').textContent ?? '', /Codex · exec/);
+    assert.equal(ui.query('[data-testid="adapter-mode"]').textContent, '真实 · 文本');
     assert.equal(ui.dom.window.document.querySelector('[data-testid="approval-demo"]'), null);
     assert.equal(ui.dom.window.document.querySelectorAll('.starter-card').length, 1);
     assert.match(ui.query('[data-testid="adapter-notice"]').textContent ?? '', /本会话历史发送到官方 Codex/);
@@ -284,12 +335,12 @@ test('React DOM: configured real Codex selects CLI, blocks approval demo and wai
     assert.ok(ui.query<HTMLButtonElement>('.composer [data-testid="cancel-task"]').disabled);
     assert.ok(ui.query<HTMLTextAreaElement>('#message-input').disabled);
     await ui.finish(session, '测试夹具中的真实模式结果；不代表真实连接已验证。');
-    assert.equal(ui.query('.message-real').textContent, '真实 · 只读');
-    assert.match(ui.query('.adapter-route').textContent ?? '', /Codex · CLI/);
+    assert.equal(ui.query('.message-real').textContent, '真实 · 文本');
+    assert.match(ui.query('.adapter-route').textContent ?? '', /Codex · exec/);
     await ui.click('.nav-item:nth-child(2)');
     const codexCard = [...ui.dom.window.document.querySelectorAll('.integration-card')]
       .find((card) => card.querySelector('h3')?.textContent === 'Codex CLI');
-    assert.equal(codexCard?.querySelector('.badge')?.textContent, '已配置 · CLI');
+    assert.equal(codexCard?.querySelector('.badge')?.textContent, '已配置 · exec');
     assert.match(codexCard?.textContent ?? '', /不代表本轮调用已成功/);
   } finally { await ui.cleanup(); }
 });
@@ -299,8 +350,8 @@ test('React DOM: disabled historical Codex retains real labels and cannot send',
   history.messages.push({ id: 'old-reply', role: 'assistant', content: '此前的回复', createdAt: timestamp, taskId: 'old-task' });
   const ui = await mount({ sessions: [history], selected: history.id });
   try {
-    assert.equal(ui.query('[data-testid="adapter-mode"]').textContent, '真实 · 只读');
-    assert.equal(ui.query('.message-real').textContent, '真实 · 只读');
+    assert.equal(ui.query('[data-testid="adapter-mode"]').textContent, '真实 · 文本');
+    assert.equal(ui.query('.message-real').textContent, '真实 · 文本');
     assert.equal(ui.dom.window.document.querySelector('[data-testid="approval-demo"]'), null);
     assert.match(ui.query('.composer-area .connection-notice').textContent ?? '', /尚未连接真实 CLI/);
     await ui.type('当前不应发送');
@@ -313,5 +364,161 @@ test('React DOM: disabled historical Codex retains real labels and cannot send',
     assert.ok(ui.query<HTMLButtonElement>('[data-adapter-id="codex"]').disabled);
     assert.ok(ui.query<HTMLButtonElement>('[data-adapter-id="claude"]').disabled);
     assert.match(ui.query('[data-adapter-id="claude"]').textContent ?? '', /Claude Code CLI 未安装/);
+  } finally { await ui.cleanup(); }
+});
+
+test('React DOM: native provider shows fixed approval details and posts one dedicated decision', async () => {
+  const ui = await mount({ bootstrap: nativeBootstrap, nativeDecision: 'deferred' });
+  try {
+    await ui.click('[data-adapter-id="codex-app-server"]');
+    assert.match(ui.query('[data-adapter-id="codex-app-server"]').textContent ?? '', /AppServer/);
+    assert.match(ui.query('[data-testid="adapter-mode"]').textContent ?? '', /原生审批/);
+    assert.equal(ui.dom.window.document.querySelector('[data-testid="approval-demo"]'), null);
+    await ui.type('检查项目状态，不重复发送这个提示词');
+    await ui.click('[data-testid="send-message"]');
+    const session = [...ui.sessions.values()][0];
+    assert.equal(session.adapterId, 'codex-app-server');
+    assert.equal(session.tasks[0].mode, 'chat');
+    const unsafeText = '<img src=x onerror="alert(1)">';
+    Object.assign(session, makeNativeSession(session.id, {
+      kind: 'file-change', operation: `Apply a change ${unsafeText}`,
+      changes: [{ path: 'src/example.ts', diff: `+ const example = '${unsafeText}';` }],
+    }));
+    await ui.publish(session);
+    const task = session.tasks[0];
+    const approval = task.nativeApprovals![0];
+    const card = ui.query('[data-testid="native-approval-card"]');
+    assert.equal(card.getAttribute('data-approval-id'), approval.id);
+    assert.ok(card.textContent?.includes(approval.operation));
+    assert.ok(card.textContent?.includes(approval.cwd!));
+    assert.ok(card.textContent?.includes(String(approval.requestId)));
+    assert.ok(card.textContent?.includes('src/example.ts'));
+    assert.ok(card.textContent?.includes(approval.changes![0].diff));
+    assert.equal(card.querySelector('img'), null);
+    assert.equal(card.querySelector('input, textarea'), null);
+    assert.equal(ui.dom.window.document.querySelector('[data-testid="approve-task"]'), null);
+    await ui.click('[data-testid="native-approve"]');
+    for (const action of ['native-approve', 'native-decline', 'native-cancel']) assert.ok(ui.query<HTMLButtonElement>(`[data-testid="${action}"]`).disabled);
+    await ui.click('[data-testid="native-approve"]');
+    const decisionRequests = ui.requests.filter((request) => request.path.includes('/native-approvals/'));
+    assert.deepEqual(decisionRequests, [{ path: `/api/tasks/${task.id}/native-approvals/${approval.id}`, method: 'POST', body: { decision: 'accept' } }]);
+    assert.equal(ui.requests.filter((request) => /^\/api\/tasks\/[^/]+\/approve$/.test(request.path)).length, 0);
+    await ui.resolveNativeDecision();
+    assert.equal(ui.query('[data-testid="native-approval-status"]').getAttribute('data-status'), 'accepted');
+    assert.equal(ui.requests.filter((request) => request.path.includes('/native-approvals/')).length, 1);
+  } finally { await ui.cleanup(); }
+});
+
+test('React DOM: native approvals expose only allowed decisions and preserve decline versus cancel', async () => {
+  for (const decision of ['decline', 'cancel'] as const) {
+    const session = makeNativeSession(`restricted-${decision}`, { allowedDecisions: [decision] });
+    const ui = await mount({ sessions: [session], selected: session.id, bootstrap: nativeBootstrap });
+    try {
+      assert.equal(ui.dom.window.document.querySelector('[data-testid="native-approve"]'), null);
+      assert.equal(ui.dom.window.document.querySelector(`[data-testid="native-${decision === 'decline' ? 'cancel' : 'decline'}"]`), null);
+      await ui.click(`[data-testid="native-${decision}"]`);
+      const requests = ui.requests.filter((request) => request.method === 'POST');
+      assert.deepEqual(requests, [{ path: `/api/tasks/task-${session.id}/native-approvals/approval-${session.id}`, method: 'POST', body: { decision } }]);
+      assert.equal(ui.query('[data-testid="native-approval-status"]').getAttribute('data-status'), decision === 'decline' ? 'declined' : 'cancelled');
+      assert.equal(ui.requests.filter((request) => /^\/api\/tasks\/[^/]+\/(approve|cancel)$/.test(request.path)).length, 0);
+    } finally { await ui.cleanup(); }
+  }
+});
+
+test('React DOM: native actions await a fresh reconnect snapshot and ignore an old session stream', async () => {
+  const a = makeNativeSession('native-a');
+  const b = makeNativeSession('native-b');
+  const ui = await mount({ sessions: [a, b], selected: a.id, bootstrap: nativeBootstrap });
+  try {
+    const stream = ui.sources.at(-1)!;
+    assert.equal(ui.query<HTMLButtonElement>('[data-testid="native-approve"]').disabled, false);
+    await act(async () => stream.onerror?.());
+    assert.ok(ui.query<HTMLButtonElement>('[data-testid="native-approve"]').disabled);
+    await ui.click('[data-testid="native-approve"]');
+    assert.equal(ui.requests.filter((request) => request.method === 'POST').length, 0);
+    await act(async () => stream.onopen?.());
+    assert.ok(ui.query<HTMLButtonElement>('[data-testid="native-approve"]').disabled);
+    await act(async () => stream.snapshot(a));
+    assert.equal(ui.query<HTMLButtonElement>('[data-testid="native-approve"]').disabled, false);
+    await ui.click(`[data-testid="session-item"][data-session-id="${b.id}"]`);
+    assert.ok(stream.closed);
+    await act(async () => stream.snapshot(a));
+    assert.equal(ui.query('[data-testid="native-approval-card"]').getAttribute('data-approval-id'), 'approval-native-b');
+    const current = ui.sessions.get(b.id)!;
+    current.tasks[0].nativeApprovals![0].expiresAt = '2000-01-01T00:00:00.000Z';
+    await ui.publish(current);
+    assert.equal(ui.dom.window.document.querySelector('[data-testid="native-approve"]:not(:disabled)'), null);
+    assert.match(ui.query('[data-testid="native-approval-status"]').textContent ?? '', /已过期/);
+    assert.equal(ui.requests.filter((request) => request.method === 'POST').length, 0);
+  } finally { await ui.cleanup(); }
+});
+
+test('React DOM: lost native decision response locks the request and checks status without replay', async () => {
+  const native = makeNativeSession('lost-decision');
+  const other = makeSession('other-session', '临时查看另一会话');
+  const ui = await mount({ sessions: [native, other], selected: native.id, bootstrap: nativeBootstrap, nativeDecision: 'drop-response' });
+  try {
+    await ui.click('[data-testid="native-approve"]');
+    assert.ok(ui.query<HTMLButtonElement>('[data-testid="native-approve"]').disabled);
+    assert.match(ui.dom.window.document.body.textContent ?? '', /未知|未确认/);
+    const getCount = ui.requests.filter((request) => request.path === `/api/sessions/${native.id}` && request.method === 'GET').length;
+    await ui.click('[data-testid="native-check-state"]');
+    assert.equal(ui.requests.filter((request) => request.path === `/api/sessions/${native.id}` && request.method === 'GET').length, getCount + 1);
+    assert.ok(ui.query<HTMLButtonElement>('[data-testid="native-approve"]').disabled);
+    const stream = ui.sources.at(-1)!;
+    await act(async () => { stream.onerror?.(); stream.onopen?.(); stream.snapshot(native); });
+    assert.ok(ui.query<HTMLButtonElement>('[data-testid="native-approve"]').disabled);
+    await ui.click('[data-testid="native-approve"]');
+    assert.equal(ui.requests.filter((request) => request.method === 'POST').length, 1);
+    await ui.click(`[data-testid="session-item"][data-session-id="${other.id}"]`);
+    await ui.click(`[data-testid="session-item"][data-session-id="${native.id}"]`);
+    assert.ok(ui.query<HTMLButtonElement>('[data-testid="native-approve"]').disabled, 'Switching sessions must not unlock a decision whose receipt was lost');
+    await ui.click('[data-testid="native-approve"]');
+    assert.equal(ui.requests.filter((request) => request.method === 'POST').length, 1);
+    await ui.click('[data-testid="native-check-state"]');
+    assert.ok(ui.query<HTMLButtonElement>('[data-testid="native-approve"]').disabled);
+    const session = ui.sessions.get(native.id)!;
+    session.tasks[0].nativeApprovals![0].status = 'accepted';
+    await ui.click('[data-testid="native-check-state"]');
+    assert.equal(ui.query('[data-testid="native-approval-status"]').getAttribute('data-status'), 'accepted');
+    assert.equal(ui.requests.filter((request) => request.method === 'POST').length, 1);
+  } finally { await ui.cleanup(); }
+});
+
+test('React DOM: unknown native turn blocks sending and recovers state without replaying the prompt', async () => {
+  const native = makeNativeSession('unknown-turn');
+  native.tasks[0].status = 'unknown';
+  native.tasks[0].stopUnconfirmed = true;
+  const recovered = structuredClone(native);
+  recovered.tasks[0].status = 'completed';
+  recovered.tasks[0].stopUnconfirmed = false;
+  recovered.tasks[0].nativeApprovals![0].status = 'resolved';
+  recovered.messages.push({ id: 'recovered-reply', role: 'assistant', content: '读取原生线程后恢复的记录', createdAt: timestamp, taskId: native.tasks[0].id });
+  const ui = await mount({ sessions: [native], selected: native.id, bootstrap: nativeBootstrap, recoveredSession: recovered });
+  try {
+    assert.equal(ui.query('[data-testid="task-status"]').getAttribute('data-status'), 'unknown');
+    assert.match(ui.dom.window.document.body.textContent ?? '', /未确认.*停止|停止.*未确认|尚未确认.*停止/);
+    assert.ok(ui.query<HTMLTextAreaElement>('#message-input').disabled);
+    for (const action of ['native-approve', 'native-decline', 'native-cancel']) assert.ok(ui.query<HTMLButtonElement>(`[data-testid="${action}"]`).disabled);
+    await ui.type('这个新提示词不能在状态未知时发送');
+    await act(async () => ui.query<HTMLFormElement>('.composer').dispatchEvent(new ui.dom.window.Event('submit', { bubbles: true, cancelable: true })));
+    await ui.flush();
+    assert.equal(ui.requests.filter((request) => request.method === 'POST').length, 0);
+    const uncertain = ui.sessions.get(native.id)!;
+    uncertain.tasks[0].status = 'failed';
+    await ui.publish(uncertain);
+    assert.ok(ui.query<HTMLTextAreaElement>('#message-input').disabled, 'An unconfirmed stop must block a new turn even when its task is terminal');
+    await act(async () => ui.query<HTMLFormElement>('.composer').dispatchEvent(new ui.dom.window.Event('submit', { bubbles: true, cancelable: true })));
+    await ui.flush();
+    assert.equal(ui.requests.filter((request) => request.method === 'POST').length, 0);
+    uncertain.tasks[0].status = 'unknown';
+    await ui.publish(uncertain);
+    await ui.click('[data-testid="native-recover"]');
+    assert.deepEqual(ui.requests.filter((request) => request.method === 'POST'), [{ path: `/api/sessions/${native.id}/recover`, method: 'POST', body: {} }]);
+    assert.equal(ui.query('[data-testid="task-status"]').getAttribute('data-status'), 'completed');
+    assert.equal(ui.query('.message-assistant .message-content').textContent, '读取原生线程后恢复的记录');
+    assert.equal(ui.query<HTMLTextAreaElement>('#message-input').disabled, false);
+    assert.equal(ui.sessions.get(native.id)!.messages.filter((message) => message.role === 'user').length, 1);
+    assert.equal(ui.requests.filter((request) => /\/tasks$/.test(request.path)).length, 0);
   } finally { await ui.cleanup(); }
 });

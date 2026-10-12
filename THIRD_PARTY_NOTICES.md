@@ -2,6 +2,12 @@
 
 RelayDesk original source is MIT-licensed. Dependencies retain their own licenses. No code from OpenClaw, n8n, Chatwoot, Open WebUI, or Open-LLM-VTuber has been copied or bundled.
 
+## Native engine integration
+
+The Codex App Server driver uses the official CLI as a separately installed, user-controlled process. The application does not vendor that binary, its dependencies or login data. The local protocol implementation follows the generated schema for official Codex CLI 0.162.1. The MIT Happy CLI and Apache-2.0 codex-acp clients were evaluated as design references; no source was copied or adapted into this implementation. HAPI and ClaudeCodeUI code were not copied. See the pinned references and licensing assessment in [the architecture decision](docs/adr-harness-options.md).
+
+Official source and its license: [openai/codex, rust-v0.162.1](https://github.com/openai/codex/tree/rust-v0.162.1). Installing the official CLI is a separate operator action; RelayDesk never installs or updates it automatically.
+
 ## Runtime dependencies
 
 ### react 19.2.8 — MIT

@@ -1,10 +1,10 @@
 # ADR: ネイティブ実行基盤への接続
 
-状態: **方針決定・実装未着手** — 次の検証対象は Codex App Server の stdio 接続。第三者コードの部分再利用は未選定。確認日: 2026-10-12。
+状態: **Codex App Server を実装し、限定した実動作を確認済み**。公式 CLI 0.162.1 の stdio 接続を採用。第三者 harness のインストールやコードのコピー・改変は行っていない。確認日: 2026-10-12。
 
 RelayDesk のプロジェクト整理、会話、タスク、メッセージ、承認画面、REST/SSE を残し、実行部分を薄い `EngineDriver` で接続する方針とする。新しいチャット製品への全面移行は行わない。Codex は公式 App Server を優先し、Claude は未改変の公式 CLI と本人による公式ログインの条件を確認する。ACP は後から交換できる接続方式として扱う。
 
-現行の Codex CLI 0.162.1 / `gpt-6-astra` では、実応答、`turn.completed`、終了コード 0、HTTP/SSE への反映、再起動後の保存を確認済み。これは現在の制限付き `exec` 経路の結果であり、App Server、Claude、ACP、実際の微信、dot との接続を検証したものではない。実測の詳細は[検証記録](verification.md)を参照。
+Codex CLI 0.162.1 / `gpt-6-astra` で、旧 exec のテキスト成功に加え、App Server の実応答、同一スレッドの再開、ファイル変更承認の拒否、即時取消、SSE 再接続、サービス再起動後の正確なターン照合を確認済み。承認して書き込む操作、Claude、ACP、実際の微信、dot は未検証。実測の詳細は [検証記録](verification.md)、起動と制約は [ネイティブドライバー](native-driver.md)を参照。
 
 本比較に伴う第三者コード・ライブラリの導入は行っていない。実装済みの変更は公式 CLI のバージョン互換対応であり、以下の候補の調査を「統合済み」とは扱わない。
 
@@ -12,7 +12,7 @@ RelayDesk のプロジェクト整理、会話、タスク、メッセージ、�
 
 | 候補 | 確認できた接続面 | 今回の判断 |
 |---|---|---|
-| **Codex App Server** | 双方向 JSON-RPC、スレッドの開始・再開、ターンの中断、コマンド・ファイル変更の承認要求。 | 次の小さな実装で Mac 上の stdio 接続を検証する。CLI の制限設定をそのまま移せるとは仮定せず、採用バージョンの schema を確認する。[公式仕様](https://learn.chatgpt.com/docs/app-server) |
+| **Codex App Server** | 双方向 JSON-RPC、スレッドの開始・再開、ターンの中断、コマンド・ファイル変更の承認要求。 | 採用済み。Mac 上の stdio 接続を 0.162.1 の schema と実際のイベントで検証した。exec の引数をそのまま移さず、MCP を子プロセス単位で無効化して有効設定を確認する。[公式仕様](https://learn.chatgpt.com/docs/app-server) |
 | **Happy CLI `cli-1.2.5`** | 旧 CLI の `codexAppServerClient.ts` に `thread/resume`、`turn/start`、`turn/interrupt` と承認コールバックがある。 | 実装の参考、または出典・著作権表示を保持した部分再利用の候補。新版の `happy-agent` とは別に評価する。まだ取り込んでいない。[対象ソース](https://github.com/slopus/happy/blob/cli-1.2.5/packages/happy-cli/src/codex/codexAppServerClient.ts)、[MIT](https://github.com/slopus/happy/blob/cli-1.2.5/LICENSE) |
 | **ACP** | `session/new`・`session/prompt`・`session/update`・`session/request_permission`。履歴ロード等は能力の確認が必要。 | 将来の `EngineDriver` の交換先。プロトコルだけでは端末認証、VPS 転送、モデル利用資格は得られない。[セッション](https://agentclientprotocol.com/protocol/v1/session-setup)、[承認](https://agentclientprotocol.com/protocol/v1/tool-calls) |
 | **HAPI `v0.30.7`** | React、Hub の SQLite、クライアント側 REST/SSE、CLI 側 Socket.IO。会話・承認・再開の API がある。 | 遠隔操作と復旧の参考候補。採用・インストール・コードコピーはしない。共通技術を使っていても RelayDesk とプロトコル互換ではない。[リリース](https://github.com/tiann/hapi/releases/tag/v0.30.7)、[構成](https://github.com/tiann/hapi/blob/v0.30.7/docs/guide/how-it-works.md)、[クライアント契約](https://github.com/tiann/hapi/blob/v0.30.7/docs/api/client-contract/index.md) |
@@ -43,7 +43,7 @@ ACP の具体候補はコミュニティ実装の [`codex-acp v2.2.2`](https://g
 1. **ID の対応表**: `projectId`、RelayDesk の `sessionId` / `taskId`、`driverId`、`machineId`、`vendorSessionId`、`vendorTurnId` を保存する。接続先と所有者も束縛し、別会話や別端末の ID を受け入れない。履歴の正本はネイティブ側、RelayDesk は表示用の写しとして扱う範囲を決める。
 2. **開始・再開・イベント**: `start` / `resume` / `submit` / `subscribe` をドライバー内に置く。本文、ツール状態、承認要求、完了・失敗を型で分ける。外部イベント ID と接続世代を照合し、再接続時は状態を照会して重複反映を防ぐ。プロンプトは自動再送しない。
 3. **一意な承認**: ローカル `approvalId` をネイティブの request ID・会話・ターン・項目 ID・操作内容・期限に結び付ける。認証された本人がプレビューした同じ操作へ `approve` / `deny` を返す。判断者、内容の版、時刻、判断、相手の解決通知を監査記録に残す。期限切れ・キャンセル・重複回答・再起動後の古い要求は許可せず、確認待ちが消えたことと操作成功を区別する。
-4. **取消と結果不明**: `cancel` の送信と停止確認を分離する。Codex は対象ターンを中断し、その終端を待つ。共有 App Server を停止して別タスクを巻き込まない。時間切れや切断で停止を確認できなければ状態不明として隔離し、次の実行を止める。現行の `CodexStopUnconfirmedError` は汎用の終了結果へ置き換える。ACP でも取消通知だけでは完了せず、元の prompt 応答を確認する。[ACP の取消仕様](https://agentclientprotocol.com/protocol/v1/prompt-turn)
+4. **取消と結果不明**: `cancel` の送信と停止確認を分離する。Codex は対象ターンを中断し、その終端を待つ。共有 App Server を停止して別タスクを巻き込まない。時間切れや切断で停止を確認できなければ状態不明として隔離し、次の実行を止める。旧 exec の `CodexStopUnconfirmedError` は残し、ネイティブ経路は `NativeOutcomeUnknownError` と明示的な終態を使用する。ACP でも取消通知だけでは完了せず、元の prompt 応答を確認する。[ACP の取消仕様](https://agentclientprotocol.com/protocol/v1/prompt-turn)
 
 最初の変更は `server/index.ts` でのローカルドライバー生成、`server/adapters.ts` の登録、`shared/types.ts` と `TaskEngine` の必要最小限の拡張に限定する。既存の mock と制限付き exec は回帰確認用に残す。ブラウザーから実行ファイル、自由な CLI 引数、作業ディレクトリを指定する経路は追加しない。
 
@@ -63,4 +63,4 @@ Codex の ChatGPT ログインと API キー課金は別経路であり、会員
 
 Claude は、未改変の公式バイナリを本人が公式フローで認証して使う条件と、第三者アプリが Agent SDK 経由で利用する条件を分ける。前者についても公式の提供条件を守り、資格情報を回収・転送しない。後者に Claude.ai ログインや会員枠を提供できると仮定しない。`--bare` は OAuth・キーチェーンを読まず、会員ログインを使う方法ではない。[Claude Code の条件](https://code.claude.com/docs/en/legal-and-compliance)、[Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview)、[bare mode](https://code.claude.com/docs/en/headless#start-faster-with-bare-mode)
 
-次の独立した小ステップでは、Codex App Server での最小テキスト会話、承認要求の拒否と取消、切断後の照合と同じ会話への再開を、この順で限定した作業環境にて確認する。操作を実際に許可するテストは、対象と影響を示したうえで明示的に承認されたものだけに限る。許可待ちのタイムアウト、古い承認、重複イベント、保存失敗も検証対象とする。今回の CLI 成功から、これらの機能、Claude、微信の自動収集・返信、dot API、常時接続の信頼性まで確認済みとはしない。
+上記の限定したネイティブ検証は完了した。次は実行中タスクの活動状況を表示する画面を独立した小ステップで追加し、その後 Claude → スマートフォン遠隔接続 → WeChat の順で進める。承認して実際に書き込むテストは未実施であり、対象と影響への明示的な承認が必要となる。自動テストでは承認期限、古い要求、重複イベント、保存失敗も検証したが、これを未接続サービスや長期稼働の保証にはしない。

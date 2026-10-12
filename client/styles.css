@@ -3525,3 +3525,272 @@ svg {
     font-size: 21px;
   }
 }
+
+/* Native approvals keep the exact server-provided operation separate from chat text. */
+.native-approvals {
+  max-width: 670px;
+  margin: 0 auto 24px;
+}
+.native-state-warning {
+  display: flex;
+  gap: 11px;
+  background: #faf5e8;
+  border: 1px solid #eadcb9;
+  border-radius: 10px;
+  padding: 17px;
+  color: #ad9050;
+  margin-bottom: 18px;
+}
+.native-state-warning > svg {
+  margin-top: 2px;
+}
+.native-state-warning strong {
+  font-size: 13px;
+  font-weight: 550;
+}
+.native-state-warning p {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.85;
+  color: #a99a72;
+}
+.native-state-warning button {
+  margin-top: 13px;
+}
+.native-state-warning small {
+  display: block;
+  font-size: 10px;
+  line-height: 1.8;
+  color: #b5a781;
+  margin-top: 9px;
+}
+.native-error {
+  margin: 0 0 14px;
+}
+.native-approval-card {
+  background: #fff;
+  border: 1px solid #cbded8;
+  border-radius: 11px;
+  margin: 15px 0;
+  overflow: hidden;
+  padding: 18px;
+}
+.native-approval-card > header {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin-bottom: 19px;
+}
+.native-approval-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: #edf5f2;
+  color: #689e89;
+  flex-shrink: 0;
+}
+.native-approval-card header > div {
+  flex: 1;
+  min-width: 0;
+}
+.native-eyebrow {
+  display: block;
+  font-size: 9px;
+  color: #91ae9f;
+  letter-spacing: .5px;
+}
+.native-approval-card h3 {
+  font-size: 14px;
+  font-weight: 550;
+  color: #4c7e69;
+  line-height: 1.6;
+  margin-top: 5px;
+}
+.native-badge {
+  background: #edf6f0;
+  border: 1px solid #d7e7dc;
+  color: #7ca286;
+}
+.native-operation pre {
+  margin: 10px 0 0;
+  padding: 13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.85;
+  color: #527e68;
+  background: #f5f8f4;
+  border: 1px solid #e3ebe0;
+  border-radius: 7px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 300px;
+  overflow: auto;
+}
+.native-approval-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+  margin: 17px 0;
+}
+.native-approval-meta > div:nth-child(-n + 2) {
+  grid-column: 1 / -1;
+}
+.native-approval-meta dt, .native-request-binding dt {
+  font-size: 10px;
+  color: #9cac99;
+  margin-bottom: 5px;
+}
+.native-approval-meta dd, .native-request-binding dd {
+  margin: 0;
+  font-size: 11px;
+  color: #7a9575;
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.native-changes {
+  border-top: 1px solid #e8eddf;
+  padding-top: 16px;
+  margin-top: 16px;
+}
+.native-change {
+  margin-top: 12px;
+  border: 1px solid #e0e8d7;
+  border-radius: 7px;
+  overflow: hidden;
+}
+.native-change h4 {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.75;
+  font-weight: 500;
+  color: #7c9670;
+  padding: 8px 11px;
+  border-bottom: 1px solid #e2e9d9;
+  background: #f1f6ec;
+  overflow-wrap: anywhere;
+}
+.native-change pre {
+  margin: 0;
+  padding: 11px;
+  background: #fafcf7;
+  color: #80936f;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 300px;
+  overflow: auto;
+}
+.native-request-binding {
+  color: #97aa85;
+  font-size: 11px;
+  line-height: 1.8;
+  margin-top: 17px;
+}
+.native-request-binding summary {
+  cursor: pointer;
+  width: fit-content;
+}
+.native-request-binding summary:focus-visible {
+  outline: 2px solid #75a387;
+  outline-offset: 3px;
+}
+.native-request-binding dl {
+  margin: 10px 0 0;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  background: #fafcf6;
+  border-radius: 6px;
+}
+.native-approval-state {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: #7a9d74;
+  margin-top: 18px;
+  line-height: 1.8;
+}
+.native-approval-unknown .native-approval-state,
+.native-approval-expired .native-approval-state {
+  color: #b09c65;
+}
+.native-approval-note {
+  color: #a5a47e;
+  font-size: 11px;
+  line-height: 1.85;
+  margin-top: 10px;
+}
+.native-approval-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+.native-approval-actions button, .native-check-state,
+.native-state-warning button {
+  font-size: 12px;
+  min-height: 38px;
+}
+.native-check-state {
+  margin-top: 13px;
+}
+.native-approval-footnote {
+  color: #a8b19b;
+  font-size: 10px;
+  line-height: 1.85;
+  border-top: 1px solid #e7edde;
+  padding-top: 12px;
+  margin-top: 16px;
+}
+.task-state.unknown .task-state-icon {
+  color: #af965c;
+  background: #f6f0df;
+}
+@media (max-width: 700px) {
+  .native-approval-card {
+    padding: 14px;
+  }
+  .native-approval-card > header {
+    gap: 9px;
+    flex-wrap: wrap;
+  }
+  .native-approval-card h3 {
+    font-size: 14px;
+  }
+  .native-eyebrow, .native-badge,
+  .native-approval-meta dt, .native-request-binding dt {
+    font-size: 10px;
+  }
+  .native-operation pre, .native-change pre,
+  .native-change h4, .native-request-binding,
+  .native-approval-meta dd, .native-request-binding dd,
+  .native-state-warning small, .native-approval-note,
+  .native-approval-footnote {
+    font-size: 12px;
+  }
+  .native-approval-actions button, .native-check-state,
+  .native-state-warning button {
+    min-height: 40px;
+    font-size: 12px;
+  }
+  .native-approval-meta {
+    grid-template-columns: 1fr;
+  }
+  .native-state-warning {
+    padding: 14px;
+    gap: 9px;
+  }
+  .native-approval-actions .primary-button {
+    flex: 1 1 100%;
+  }
+  .native-approval-actions .secondary-button {
+    flex: 1;
+  }
+}

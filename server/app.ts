@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { extname, join, relative, resolve } from 'node:path';
-import type { Bootstrap, ExecutionAdapter, TaskMode } from '../shared/types.ts';
+import type { Bootstrap, EngineDriver, ExecutionAdapter, NativeApprovalDecision, TaskMode } from '../shared/types.ts';
 import { adapterCatalog } from './adapters.ts';
 import { HttpError, TaskEngine } from './engine.ts';
 import { InboxService } from './inbox.ts';
@@ -76,10 +76,10 @@ function keys(value: Record<string, unknown>, allowed: string[]) {
 }
 
 /** Codex is an optional internal startup dependency, never an HTTP-provided executable. */
-export function createApp({ dbPath, delayMs = 65, staticDir = resolve('dist'), codex, acknowledgeInterruptedCodex = false }: { dbPath: string; delayMs?: number; staticDir?: string; codex?: ExecutionAdapter; acknowledgeInterruptedCodex?: boolean }) {
-  const engine = new TaskEngine(dbPath, delayMs, codex, { acknowledgeInterruptedCodex });
+export function createApp({ dbPath, delayMs = 65, staticDir = resolve('dist'), codex, nativeDriver, acknowledgeInterruptedCodex = false }: { dbPath: string; delayMs?: number; staticDir?: string; codex?: ExecutionAdapter; nativeDriver?: EngineDriver; acknowledgeInterruptedCodex?: boolean }) {
+  const engine = new TaskEngine(dbPath, delayMs, codex, { acknowledgeInterruptedCodex, nativeDriver });
   const inbox = new InboxService(dbPath, { delayMs });
-  const runtimeBootstrap: Bootstrap = { ...bootstrap, adapters: engine.catalog(), runtime: { ...bootstrap.runtime, agent: codex ? 'Mac 本地执行器 · Codex CLI 已配置' : bootstrap.runtime.agent } };
+  const runtimeBootstrap: Bootstrap = { ...bootstrap, adapters: engine.catalog(), runtime: { ...bootstrap.runtime, agent: nativeDriver ? 'Mac 本地执行器 · Codex App Server 已配置' : codex ? 'Mac 本地执行器 · Codex exec 旧模式已配置' : bootstrap.runtime.agent } };
   const listeners = new Map<string, Set<ServerResponse>>();
   const staticFiles = new Map<string, { bytes: Buffer; type: string }>();
   if (existsSync(staticDir)) {
@@ -134,10 +134,14 @@ export function createApp({ dbPath, delayMs = 65, staticDir = resolve('dist'), c
         if (data.title !== undefined && (typeof data.title !== 'string' || !data.title.trim() || data.title.length > 80)) throw new HttpError(400, '会话名称必须为 1–80 个字符。');
         return json(response, 201, { session: engine.create(data.adapterId, typeof data.title === 'string' ? data.title.trim() : undefined) });
       }
-      const sessionRoute = pathname.match(/^\/api\/sessions\/([^/]+)(?:\/(tasks|events))?$/);
+      const sessionRoute = pathname.match(/^\/api\/sessions\/([^/]+)(?:\/(tasks|events|recover))?$/);
       if (sessionRoute) {
         const [, id, suffix] = sessionRoute;
         if (method === 'GET' && !suffix) return json(response, 200, { session: engine.get(id) });
+        if (method === 'POST' && suffix === 'recover') {
+          keys(await body(request), []);
+          return json(response, 200, { session: await engine.recover(id) });
+        }
         if (method === 'GET' && suffix === 'events') {
           const session = engine.get(id);
           response.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
@@ -157,6 +161,13 @@ export function createApp({ dbPath, delayMs = 65, staticDir = resolve('dist'), c
           if (data.mode !== undefined && data.mode !== 'chat' && data.mode !== 'approval-demo') throw new HttpError(400, '不支持此任务模式。');
           return json(response, 202, { task: engine.submit(id, data.prompt.trim(), (data.mode ?? 'chat') as TaskMode) });
         }
+      }
+      const nativeApprovalRoute = pathname.match(/^\/api\/tasks\/([^/]+)\/native-approvals\/([^/]+)$/);
+      if (method === 'POST' && nativeApprovalRoute) {
+        const data = await body(request);
+        keys(data, ['decision']);
+        if (!['accept', 'decline', 'cancel'].includes(String(data.decision))) throw new HttpError(400, '不支持此原生审批决定。');
+        return json(response, 200, { session: await engine.decideNativeApproval(nativeApprovalRoute[1], nativeApprovalRoute[2], data.decision as NativeApprovalDecision) });
       }
       const taskRoute = pathname.match(/^\/api\/tasks\/([^/]+)\/(cancel|approve)$/);
       if (method === 'POST' && taskRoute) {
