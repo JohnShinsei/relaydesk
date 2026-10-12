@@ -164,6 +164,13 @@ export function createCodexAdapter(options: CodexOptions): ExecutionAdapter {
             stop('Codex 返回了未知的事件协议，已停止执行；请检查 CLI 版本。'); return;
           }
           const item = value.item as Record<string, unknown>;
+          if (item.type === 'error') {
+            const message = typeof item.message === 'string' ? item.message : '';
+            stop(/model metadata/i.test(message) && /not found|missing/i.test(message)
+              ? 'Codex CLI 缺少当前模型的元数据，已停止执行；请在本机检查或更新 CLI 模型目录。'
+              : 'Codex 请求失败。请在本地官方 CLI 检查登录、额度、模型配置、网络和版本。');
+            return;
+          }
           if (item.type !== 'agent_message' && item.type !== 'reasoning') {
             stop('Codex 报告了超出聊天范围的工具事件，已停止执行；请检查本地 CLI 限制。'); return;
           }

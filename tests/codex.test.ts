@@ -145,6 +145,29 @@ test('unsupported model errors provide a local configuration action without expo
   });
 });
 
+test('CLI diagnostic items fail with sanitized metadata or provider errors rather than a tool-event label', async t => {
+  for (const diagnostic of [
+    { message: 'Model metadata for `gpt-6-astra` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.', expected: /检查或更新 CLI 模型目录/ },
+    { message: 'SECRET diagnostic /private/account user@example.invalid', expected: /Codex 请求失败/ },
+  ]) {
+    const f = await adapterFixture(t, child => {
+      child.event({ type: 'item.completed', item: { id: 'diagnostic', type: 'error', message: diagnostic.message } });
+      child.event({ type: 'turn.started' });
+      child.event({ type: 'item.completed', item: { id: 'fallback', type: 'agent_message', text: 'fallback must not continue' } });
+      child.event({ type: 'turn.completed' });
+    });
+    const input = context();
+    await assert.rejects(f.adapter.execute(input), error => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, diagnostic.expected);
+      assert.doesNotMatch(error.message, /工具事件|Model metadata|gpt-6-astra|SECRET|\/private|user@example/);
+      return true;
+    });
+    assert.deepEqual(input.output, []);
+    assert.deepEqual(f.children[0].signals, ['SIGTERM']);
+  }
+});
+
 test('tool items and unknown protocols stop immediately before any later assistant output', async t => {
   for (const phase of ['item.started', 'item.updated', 'item.completed']) {
     for (const type of ['command_execution', 'file_change', 'mcp_tool_call', 'web_search', 'unknown_tool']) {
