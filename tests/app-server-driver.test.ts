@@ -9,7 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from 'node:child_process';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
-import type { EngineBinding, ExecutionContext, NativeApproval } from '../shared/types.ts';
+import type { EngineBinding, ExecutionContext, NativeActivityKind, NativeApproval } from '../shared/types.ts';
 import { codexAppServerArguments, createCodexAppServerDriver, NativeOutcomeUnknownError } from '../server/codex-app-server.ts';
 import type { CodexAppServerOptions } from '../server/codex-app-server.ts';
 
@@ -105,6 +105,7 @@ async function fixture(t: TestContext, scenario: Scenario = {}, options: Partial
 function context(binding?: EngineBinding) {
   const controller = new AbortController();
   const messages = new Map<string, string>(); const bindings: EngineBinding[] = []; const turns: string[] = []; const approvals: NativeApproval[] = []; const resolved: string[] = []; const terminals: string[] = [];
+  const activities: NativeActivityKind[] = [];
   const input: ExecutionContext = {
     task: { id: 'local-task', sessionId: 'local-session', adapterId: 'codex-app-server', prompt: 'latest prompt', mode: 'chat', status: 'running', createdAt: 'now', updatedAt: 'now', events: [] },
     history: [{ id: 'history', taskId: 'old-task', role: 'user', content: 'must not replay local history', createdAt: 'before' }], signal: controller.signal, emit: () => assert.fail('native driver must use item upserts'),
@@ -112,9 +113,10 @@ function context(binding?: EngineBinding) {
       binding, onBinding: value => { bindings.push(value); }, onTurn: value => { turns.push(value); },
       upsertMessage: (id, text) => { messages.set(id, text); }, onApproval: value => { approvals.push(value); },
       onApprovalResolved: id => { resolved.push(id); }, onTerminal: status => { terminals.push(status); },
+      onActivity: kind => { activities.push(kind); },
     },
   };
-  return { input, controller, messages, bindings, turns, approvals, resolved, terminals };
+  return { input, controller, messages, bindings, turns, approvals, resolved, terminals, activities };
 }
 async function until(predicate: () => boolean) { for (let n = 0; n < 300; n++) { if (predicate()) return; await delay(2); } assert.fail('offline fixture timed out'); }
 const approvalParams = (workspace: string, extra = {}) => ({ threadId: 'native-thread', turnId: 'native-turn', itemId: 'command-item', startedAtMs: 1, command: 'echo harmless', cwd: workspace, ...extra });
@@ -411,4 +413,157 @@ test('callback persistence failures and malformed protocol stop without crashing
   await assert.rejects(f.driver.execute(c.input), error => error instanceof NativeOutcomeUnknownError && !error.message.includes('SECRET'));
   const malformed = await fixture(t, { turn: child => child.stdout.write('SECRET bad JSON\n') });
   await assert.rejects(malformed.driver.execute(context().input), error => error instanceof NativeOutcomeUnknownError && !error.message.includes('SECRET'));
+});
+
+test('native activity reports exact metadata only and refreshes repeated deltas and completed items', async t => {
+  const scope = { threadId: 'native-thread', turnId: 'native-turn' };
+  const answer = { id: 'answer', type: 'agentMessage', text: 'SECRET assistant answer' };
+  const command = { id: 'command', type: 'commandExecution', command: 'SECRET command', cwd: '/SECRET/workspace', aggregatedOutput: 'SECRET output' };
+  const file = { id: 'file', type: 'fileChange', changes: [{ path: 'SECRET/file.txt', diff: '+SECRET patch' }] };
+  const reasoning = { id: 'reason', type: 'reasoning', summary: ['SECRET reasoning'], content: ['SECRET private reasoning'] };
+  const f = await fixture(t, { turn: child => {
+    child.notify('item/started', { ...scope, item: reasoning });
+    child.notify('item/reasoning/summaryPartAdded', { ...scope, itemId: 'reason', summaryIndex: 0 });
+    child.notify('item/reasoning/summaryTextDelta', { ...scope, itemId: 'reason', summaryIndex: 0, delta: 'SECRET summary' });
+    child.notify('item/reasoning/textDelta', { ...scope, itemId: 'reason', contentIndex: 0, delta: 'SECRET reasoning delta' });
+    child.notify('item/completed', { ...scope, item: reasoning });
+    child.notify('item/started', { ...scope, item: { ...answer, text: '' } });
+    for (const delta of ['SECRET', 'SECRET']) child.notify('item/agentMessage/delta', { ...scope, itemId: 'answer', delta });
+    child.notify('item/completed', { ...scope, item: answer });
+    child.notify('item/completed', { ...scope, item: answer });
+    child.notify('item/agentMessage/delta', { ...scope, itemId: 'answer', delta: 'SECRET ignored after completion' });
+    child.notify('item/started', { ...scope, item: command });
+    child.notify('item/commandExecution/outputDelta', { ...scope, itemId: 'command', delta: 'SECRET command output' });
+    child.notify('item/commandExecution/terminalInteraction', { ...scope, itemId: 'command', processId: 'SECRET process', stdin: 'SECRET input' });
+    child.notify('item/completed', { ...scope, item: command });
+    child.notify('item/started', { ...scope, item: file });
+    child.notify('item/fileChange/patchUpdated', { ...scope, itemId: 'file', changes: file.changes });
+    child.notify('item/fileChange/outputDelta', { ...scope, itemId: 'file', delta: 'SECRET file output' });
+    child.notify('item/completed', { ...scope, item: file });
+    child.terminal('completed', [answer]);
+  } });
+  const c = context(); const argumentsSeen: unknown[][] = [];
+  c.input.native!.onActivity = async (...args) => { argumentsSeen.push(args); c.activities.push(args[0]); await delay(1); };
+  await f.driver.execute(c.input);
+  assert.deepEqual(c.activities, [
+    'connecting', 'thread-ready', 'turn-started',
+    'reasoning', 'reasoning', 'reasoning', 'reasoning', 'reasoning',
+    'answering', 'answering', 'answering', 'answering', 'answering', 'answering',
+    'command', 'command', 'command', 'command',
+    'file-change', 'file-change', 'file-change', 'file-change', 'answering',
+  ]);
+  assert.ok(argumentsSeen.every(args => args.length === 1 && typeof args[0] === 'string'));
+  assert.equal(JSON.stringify(argumentsSeen).includes('SECRET'), false);
+  assert.equal(c.messages.get('answer'), answer.text);
+  const count = c.activities.length;
+  await f.driver.recover(f.binding, 'native-turn');
+  assert.equal(c.activities.length, count);
+  assert.ok(f.children[1].frames.some(frame => frame.method === 'thread/read'));
+});
+
+test('activity waits for lifecycle persistence and ignores unsubmitted or unrelated native notifications', async t => {
+  const scope = { threadId: 'native-thread', turnId: 'native-turn' };
+  const emitItems = (child: NativeChild, identity: typeof scope) => {
+    child.notify('item/agentMessage/delta', { ...identity, itemId: 'foreign-answer', delta: 'SECRET' });
+    for (const method of ['item/reasoning/summaryTextDelta', 'item/reasoning/summaryPartAdded', 'item/reasoning/textDelta', 'item/commandExecution/outputDelta', 'item/commandExecution/terminalInteraction', 'item/fileChange/outputDelta']) {
+      child.notify(method, { ...identity, itemId: 'foreign-item', summaryIndex: 0, contentIndex: 0, delta: 'SECRET', processId: 'process', stdin: 'SECRET' });
+    }
+    for (const method of ['item/started', 'item/completed']) {
+      child.notify(method, { ...identity, item: { id: 'foreign-command', type: 'commandExecution', command: 'SECRET', cwd: '/SECRET' } });
+      child.notify(method, { ...identity, item: { id: 'foreign-file', type: 'fileChange', changes: [{ path: 'SECRET', diff: '+SECRET' }] } });
+      child.notify(method, { ...identity, item: { id: 'foreign-reason', type: 'reasoning', summary: ['SECRET'] } });
+    }
+    child.notify('item/fileChange/patchUpdated', { ...identity, itemId: 'foreign-file', changes: [{ path: 'SECRET', diff: '+SECRET' }] });
+  };
+  const f = await fixture(t, { turn: child => {
+    child.notify('turn/started', { threadId: 'another-thread', turn: { id: 'another-turn' } });
+    emitItems(child, { threadId: 'another-thread', turnId: 'native-turn' });
+    emitItems(child, { threadId: 'native-thread', turnId: 'another-turn' });
+    child.notify('account/updated', { authMode: 'chatgpt' });
+    child.notify('configWarning', { summary: 'SECRET warning' });
+    child.notify('account/rateLimits/updated', { SECRET: true });
+    child.terminal();
+  } });
+  const c = context(); let persisted = false;
+  c.input.native!.onBinding = async binding => {
+    c.bindings.push(binding);
+    f.children[0].notify('turn/started', { threadId: 'native-thread', turn: { id: 'premature-turn' } });
+    emitItems(f.children[0], scope);
+    await delay(2); persisted = true;
+  };
+  c.input.native!.onActivity = async kind => {
+    c.activities.push(kind);
+    if (kind === 'connecting') { await delay(1); assert.equal(f.children.length, 0); }
+    if (kind === 'thread-ready') {
+      assert.equal(persisted, true);
+      await delay(1);
+      assert.equal(f.children[0].frames.some(frame => frame.method === 'turn/start'), false);
+    }
+  };
+  await f.driver.execute(c.input);
+  assert.deepEqual(c.activities, ['connecting', 'thread-ready', 'turn-started']);
+  assert.deepEqual(c.turns, ['native-turn']);
+  assert.equal(c.messages.size, 0);
+});
+
+test('activity callback persistence failures stop safely and never expose callback diagnostics', async t => {
+  for (const target of ['connecting', 'thread-ready', 'turn-started', 'reasoning', 'answering', 'command', 'file-change'] as const) {
+    const f = await fixture(t, { turn: child => {
+      const scope = { threadId: 'native-thread', turnId: 'native-turn' };
+      child.notify('item/reasoning/textDelta', { ...scope, itemId: 'reason', contentIndex: 0, delta: 'SECRET reasoning' });
+      child.notify('item/agentMessage/delta', { ...scope, itemId: 'answer', delta: 'SECRET answer' });
+      child.notify('item/started', { ...scope, item: { id: 'command', type: 'commandExecution', command: 'SECRET', cwd: '/SECRET' } });
+      child.notify('item/started', { ...scope, item: { id: 'file', type: 'fileChange', changes: [{ path: 'SECRET', diff: '+SECRET' }] } });
+      child.terminal();
+    } });
+    const c = context();
+    c.input.native!.onActivity = async kind => {
+      c.activities.push(kind);
+      if (kind === target) { await delay(1); throw new Error('SECRET activity storage path'); }
+    };
+    const beforeSubmission = target === 'connecting' || target === 'thread-ready';
+    await assert.rejects(f.driver.execute(c.input), error => error instanceof Error && !error.message.includes('SECRET') && (beforeSubmission ? !(error instanceof NativeOutcomeUnknownError) : error instanceof NativeOutcomeUnknownError));
+    assert.equal(c.activities.at(-1), target);
+    assert.deepEqual(c.terminals, []);
+    assert.ok(f.children.every(child => child.closed));
+    if (beforeSubmission) assert.ok(f.children.every(child => !child.frames.some(frame => frame.method === 'turn/start')));
+    else assert.equal(f.children[0].frames.filter(frame => frame.method === 'turn/start').length, 1);
+  }
+});
+
+test('turn activity waits for a matching turn-start response and drops metadata from mismatched native turns', async t => {
+  for (const matches of [true, false]) {
+    let startFrame: Frame | undefined;
+    const notifiedTurn = matches ? 'native-turn' : 'old-native-turn';
+    const f = await fixture(t, { start: (frame, child) => {
+      startFrame = frame;
+      child.notify('turn/started', { threadId: 'native-thread', turn: { id: notifiedTurn } });
+      child.notify('item/reasoning/textDelta', { threadId: 'native-thread', turnId: notifiedTurn, itemId: 'reason', contentIndex: 0, delta: 'SECRET reasoning' });
+      child.notify('item/agentMessage/delta', { threadId: 'native-thread', turnId: notifiedTurn, itemId: 'answer', delta: 'SECRET answer' });
+    } });
+    const c = context(); const execution = f.driver.execute(c.input);
+    const failure = matches ? undefined : assert.rejects(execution, NativeOutcomeUnknownError);
+    await until(() => !!startFrame && c.messages.has('answer'));
+    assert.deepEqual(c.activities, ['connecting', 'thread-ready']);
+    f.children[0].reply(startFrame!.id, { turn: { id: 'native-turn', status: 'inProgress', items: [] } });
+    if (matches) {
+      await until(() => c.activities.length === 5);
+      assert.deepEqual(c.activities, ['connecting', 'thread-ready', 'turn-started', 'reasoning', 'answering']);
+      f.children[0].terminal(); await execution;
+    } else {
+      await failure;
+      assert.deepEqual(c.activities, ['connecting', 'thread-ready']);
+      assert.deepEqual(c.terminals, []);
+    }
+  }
+});
+
+test('activity callback cancellation before connection does not create a native process', async t => {
+  const f = await fixture(t); const c = context();
+  c.input.native!.onActivity = async kind => {
+    c.activities.push(kind); await delay(1); c.controller.abort();
+  };
+  await assert.rejects(f.driver.execute(c.input), /已取消/);
+  assert.deepEqual(c.activities, ['connecting']);
+  assert.equal(f.children.length, 0);
 });

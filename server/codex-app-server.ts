@@ -4,7 +4,7 @@ import { accessSync, constants, existsSync, mkdirSync, realpathSync } from 'node
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import type { EngineBinding, EngineDriver, ExecutionContext, NativeApproval, NativeApprovalDecision, NativeRecovery } from '../shared/types.ts';
+import type { EngineBinding, EngineDriver, ExecutionContext, NativeActivityKind, NativeApproval, NativeApprovalDecision, NativeRecovery } from '../shared/types.ts';
 import { codexEnvironment } from './codex-adapter.ts';
 import { JsonRpcPeer } from './json-rpc.ts';
 import type { RpcId } from './json-rpc.ts';
@@ -46,6 +46,14 @@ const identifier = (value: unknown): value is string => typeof value === 'string
 const rpcKey = (id: RpcId) => `${typeof id}:${id}`;
 const safeFailure = 'Codex 原生协议请求失败；请在本机检查 CLI 配置、登录、模型与网络。';
 const uncertain = '无法确认 Codex 原生任务结果；请查询原会话状态，不要自动重新提交消息。';
+const activityNotifications: Readonly<Record<string, NativeActivityKind>> = {
+  'item/reasoning/summaryTextDelta': 'reasoning',
+  'item/reasoning/summaryPartAdded': 'reasoning',
+  'item/reasoning/textDelta': 'reasoning',
+  'item/commandExecution/outputDelta': 'command',
+  'item/commandExecution/terminalInteraction': 'command',
+  'item/fileChange/outputDelta': 'file-change',
+};
 
 export function codexAppServerArguments(disabledMcpNames: string[] = []): string[] {
   // 0.162.1 splits override paths on literal dots; it does not parse quoted TOML keys.
@@ -76,6 +84,9 @@ interface ActiveRun {
   threadId?: string;
   turnId?: string;
   turnActive: boolean;
+  turnResponseVerified: boolean;
+  pendingActivities: NativeActivityKind[];
+  activityQueue: Promise<void>;
   submitted: boolean;
   terminal?: NativeRecovery;
   failure?: Error;
@@ -137,6 +148,29 @@ export function createCodexAppServerDriver(options: CodexAppServerOptions): Engi
   function enqueue(run: ActiveRun, operation: () => Promise<void>) {
     run.queue = run.queue.then(operation).catch(() => { fail(run, run.submitted ? uncertain : safeFailure); });
   }
+  async function activity(context: ExecutionContext | undefined, kind: NativeActivityKind) {
+    // Only fixed metadata crosses this callback; native reasoning and tool payloads stay out.
+    try { await context?.native?.onActivity?.(kind); }
+    catch { throw new Error(safeFailure); }
+  }
+  async function turnActivity(run: ActiveRun, kind: NativeActivityKind) {
+    if (run.failure) throw run.failure;
+    if (!run.turnResponseVerified) {
+      // Native notifications may precede the response proving which turn was submitted.
+      if (run.pendingActivities.length === 16) run.pendingActivities.shift();
+      run.pendingActivities.push(kind);
+      return;
+    }
+    run.activityQueue = run.activityQueue.then(() => activity(run.context, kind));
+    await run.activityQueue;
+  }
+  async function verifyTurnActivities(run: ActiveRun) {
+    if (run.failure) throw run.failure;
+    run.turnResponseVerified = true;
+    for (const kind of run.pendingActivities.splice(0)) run.activityQueue = run.activityQueue.then(() => activity(run.context, kind));
+    try { await run.activityQueue; }
+    catch { throw new NativeOutcomeUnknownError(uncertain); }
+  }
   function eventScope(run: ActiveRun, params: RecordValue): boolean {
     return params.threadId === run.threadId && identifier(params.turnId) && (!run.turnId || params.turnId === run.turnId);
   }
@@ -176,12 +210,17 @@ export function createCodexAppServerDriver(options: CodexAppServerOptions): Engi
     if (!record(value) || !identifier(value.id) || typeof value.type !== 'string') throw new Error('Invalid item');
     if (value.type === 'agentMessage') {
       if (typeof value.text !== 'string') throw new Error('Invalid message');
+      await turnActivity(run, 'answering');
       if (completed || !run.messages.has(value.id)) await upsert(run, value.id, value.text, completed);
-    } else if (value.type === 'fileChange') run.fileChanges.set(value.id, changes(value.changes));
-    else if (value.type === 'commandExecution') {
+    } else if (value.type === 'fileChange') {
+      run.fileChanges.set(value.id, changes(value.changes));
+      await turnActivity(run, 'file-change');
+    } else if (value.type === 'commandExecution') {
       if (typeof value.command !== 'string' || typeof value.cwd !== 'string') throw new Error('Invalid command');
       run.commands.set(value.id, { command: value.command, cwd: value.cwd });
-    } else if (!['userMessage', 'reasoning', 'plan', 'contextCompaction', 'sleep'].includes(value.type)) throw new Error('Unsupported native tool');
+      await turnActivity(run, 'command');
+    } else if (value.type === 'reasoning') await turnActivity(run, 'reasoning');
+    else if (!['userMessage', 'plan', 'contextCompaction', 'sleep'].includes(value.type)) throw new Error('Unsupported native tool');
   }
   async function notification(run: ActiveRun, method: string, value: unknown) {
     if (run.failure || run.terminal) return;
@@ -213,7 +252,10 @@ export function createCodexAppServerDriver(options: CodexAppServerOptions): Engi
       return;
     }
     if (method === 'turn/started') {
-      if (value.threadId === run.threadId && run.submitted && record(value.turn)) await bindTurn(run, value.turn.id, true);
+      if (value.threadId === run.threadId && run.submitted && record(value.turn)) {
+        await bindTurn(run, value.turn.id, true);
+        await turnActivity(run, 'turn-started');
+      }
       return;
     }
     if (method === 'turn/completed') {
@@ -233,7 +275,16 @@ export function createCodexAppServerDriver(options: CodexAppServerOptions): Engi
       if (!eventScope(run, value) || !run.submitted) return;
       await bindTurn(run, value.turnId, true);
       if (!identifier(value.itemId) || typeof value.delta !== 'string') throw new Error('Invalid delta');
+      await turnActivity(run, 'answering');
       if (!run.completedMessages.has(value.itemId)) await upsert(run, value.itemId, (run.messages.get(value.itemId) ?? '') + value.delta, false);
+      return;
+    }
+    const activityKind = Object.hasOwn(activityNotifications, method) ? activityNotifications[method] : undefined;
+    if (activityKind) {
+      if (!eventScope(run, value) || !run.submitted) return;
+      if (!identifier(value.itemId)) throw new Error('Invalid activity identity');
+      await bindTurn(run, value.turnId, true);
+      await turnActivity(run, activityKind);
       return;
     }
     if (method === 'item/started' || method === 'item/completed') {
@@ -241,17 +292,18 @@ export function createCodexAppServerDriver(options: CodexAppServerOptions): Engi
       return;
     }
     if (method === 'item/fileChange/patchUpdated') {
-      if (!eventScope(run, value) || !identifier(value.itemId)) return;
+      if (!eventScope(run, value) || !run.submitted || !identifier(value.itemId)) return;
       await bindTurn(run, value.turnId, true);
       const updated = changes(value.changes);
       for (const pending of run.approvals.values()) if (!pending.replied && pending.view.itemId === value.itemId && pending.view.kind === 'file-change' && JSON.stringify(updated) !== JSON.stringify(pending.view.changes)) {
         pending.replied = true; await run.peer.respond(pending.view.requestId, { decision: 'decline' }); await resolveApproval(run, pending);
       }
       run.fileChanges.set(value.itemId, updated);
+      await turnActivity(run, 'file-change');
       return;
     }
     // These notifications carry lifecycle/diagnostic data, never permissions or final results.
-    if (['error', 'warning', 'guardianWarning', 'skills/changed', 'thread/started', 'thread/status/changed', 'thread/tokenUsage/updated', 'thread/name/updated', 'thread/compacted', 'turn/diff/updated', 'turn/plan/updated', 'item/commandExecution/outputDelta', 'item/commandExecution/terminalInteraction', 'item/fileChange/outputDelta', 'item/reasoning/summaryTextDelta', 'item/reasoning/summaryPartAdded', 'item/reasoning/textDelta', 'item/plan/delta', 'account/rateLimits/updated', 'model/rerouted', 'model/verification', 'model/safetyBuffering/updated'].includes(method)) return;
+    if (['error', 'warning', 'guardianWarning', 'skills/changed', 'thread/started', 'thread/status/changed', 'thread/tokenUsage/updated', 'thread/name/updated', 'thread/compacted', 'turn/diff/updated', 'turn/plan/updated', 'item/plan/delta', 'account/rateLimits/updated', 'model/rerouted', 'model/verification', 'model/safetyBuffering/updated'].includes(method)) return;
     throw new Error('Unsupported notification');
   }
   async function serverRequest(run: ActiveRun, requestId: RpcId, method: string, value: unknown) {
@@ -304,6 +356,7 @@ export function createCodexAppServerDriver(options: CodexAppServerOptions): Engi
     const run = {
       child, closed: false, closedPromise: new Promise<void>(resolve => { markClosed = resolve; }),
       queue: Promise.resolve(), context, submitted: false, turnActive: false,
+      turnResponseVerified: false, pendingActivities: [] as NativeActivityKind[], activityQueue: Promise.resolve(),
       finished: new Promise<NativeRecovery>((resolve, rejectPromise) => { finish = resolve; reject = rejectPromise; }),
       finish: (result: NativeRecovery) => finish(result), fail: (error: Error) => reject(error),
       approvals: new Map(), messages: new Map(), completedMessages: new Set(), fileChanges: new Map(), commands: new Map(),
@@ -399,6 +452,8 @@ export function createCodexAppServerDriver(options: CodexAppServerOptions): Engi
       let run: ActiveRun | undefined;
       const abort = () => { if (run) void interrupt(run); };
       try {
+        await activity(context, 'connecting');
+        if (context.signal.aborted) throw new Error('原生任务已取消。');
         run = connect(context); active = run;
         context.signal.addEventListener('abort', abort, { once: true });
         run = await prepare(run, context); active = run;
@@ -416,6 +471,9 @@ export function createCodexAppServerDriver(options: CodexAppServerOptions): Engi
         catch { throw new Error('无法保存原生会话绑定，尚未提交消息。'); }
         await run.queue;
         if (run.failure) throw run.failure;
+        await activity(context, 'thread-ready');
+        await run.queue;
+        if (run.failure) throw run.failure;
         if (context.signal.aborted) throw new Error('原生任务已取消。');
         run.timeout = setTimeout(() => { run!.timedOut = true; void interrupt(run!); }, options.timeoutMs ?? 120_000);
         run.submitted = true;
@@ -426,6 +484,7 @@ export function createCodexAppServerDriver(options: CodexAppServerOptions): Engi
         });
         if (!record(started) || !record(started.turn)) throw new Error('Invalid turn response');
         await bindTurn(run, started.turn.id);
+        await verifyTurnActivities(run);
         await run.finished;
         await run.queue;
       } catch (error) {

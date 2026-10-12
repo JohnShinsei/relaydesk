@@ -14,10 +14,26 @@ export interface NativeApproval {
   createdAt: string; expiresAt: string; decidedAt?: string; decision?: NativeApprovalDecision;
 }
 export interface EngineBinding { driverId: 'codex-app-server'; threadId: string; workspace: string; version: '0.162.1' }
-export interface Task { id: string; sessionId: string; adapterId: AdapterId; prompt: string; mode: TaskMode; status: TaskStatus; createdAt: string; updatedAt: string; error?: string; stopUnconfirmed?: boolean; nativeTurnId?: string; nativeApprovals?: NativeApproval[]; approval?: { title: string; description: string }; events: { status: TaskStatus; at: string; detail: string }[] }
+export interface Task { id: string; sessionId: string; adapterId: AdapterId; prompt: string; mode: TaskMode; status: TaskStatus; createdAt: string; updatedAt: string; error?: string; stopUnconfirmed?: boolean; nativeTurnId?: string; nativeApprovals?: NativeApproval[]; approval?: { title: string; description: string }; events: { status: TaskStatus; at: string; detail: string }[]; startedAt?: string; endedAt?: string; lastActivityAt?: string; activity?: TaskActivity[]; activitySeq?: number; idempotencyKey?: string }
 export interface Session { id: string; title: string; adapterId: AdapterId; createdAt: string; updatedAt: string; messages: Message[]; tasks: Task[]; engineBinding?: EngineBinding }
 export interface SessionSummary { id: string; title: string; adapterId: AdapterId; createdAt: string; updatedAt: string; lastMessage: string; status: TaskStatus | 'idle' }
 export interface Bootstrap { adapters: AdapterInfo[]; channels: ChannelInfo[]; runtime: { mode: 'local'; agent: string; gateway: 'local'; version: string } }
+
+/** Fixed metadata only: no prompts, reasoning text, commands, output, paths or configuration. */
+export type NativeActivityKind = 'connecting' | 'thread-ready' | 'turn-started' | 'reasoning' | 'answering' | 'command' | 'file-change';
+export type TaskActivityKind = NativeActivityKind | TaskStatus | 'approval-resolved' | 'recovery';
+export interface TaskActivity { seq: number; at: string; kind: TaskActivityKind; label: string }
+export type TaskFeedScope = 'active' | 'history' | 'all';
+export interface TaskFeedItem {
+  id: string; sessionId: string; adapterId: 'codex-app-server'; provider: 'Codex'; title: string;
+  project: { id: string; label: string } | null;
+  status: TaskStatus; createdAt: string; startedAt?: string; endedAt?: string;
+  elapsedMs: number; lastActivityAt: string; currentActivity: TaskActivity | null; stopUnconfirmed: boolean;
+  pendingApprovalCount: number;
+  pendingApprovals: { id: string; kind: NativeApproval['kind']; status: 'pending' | 'responding'; createdAt: string; expiresAt: string }[];
+}
+export interface TaskFeedPage { items: TaskFeedItem[]; scope: TaskFeedScope; total: number; activeCount: number; historyCount: number; truncated: boolean; nextCursor: string | null; generatedAt: string; revision: string }
+export interface TaskActivityPage { taskId: string; items: TaskActivity[]; nextBefore: number | null; retainedFrom: number | null; latestSeq: number; truncated: boolean; generatedAt: string }
 
 // Future adapters consume structured inputs; never accept a shell command from a browser.
 export interface NativeExecutionContext {
@@ -28,6 +44,7 @@ export interface NativeExecutionContext {
   onApproval: (approval: NativeApproval) => void | Promise<void>;
   onApprovalResolved: (approvalId: string) => void | Promise<void>;
   onTerminal: (status: 'completed' | 'cancelled' | 'failed', error?: string) => void | Promise<void>;
+  onActivity?: (kind: NativeActivityKind) => void | Promise<void>;
 }
 export interface ExecutionContext { task: Task; history: Message[]; signal: AbortSignal; emit: (chunk: string) => void; native?: NativeExecutionContext }
 export interface ExecutionAdapter { info: AdapterInfo; execute(context: ExecutionContext): Promise<void> }

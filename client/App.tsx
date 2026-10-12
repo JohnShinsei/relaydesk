@@ -8,6 +8,7 @@ import {
   WifiOff, X,
 } from 'lucide-react';
 import Inbox from './Inbox.tsx';
+import TaskActivity from './TaskActivity.tsx';
 import NativeApprovals from './NativeApprovals.tsx';
 import type { NativeDecisionAttempt } from './NativeApprovals.tsx';
 import type { AdapterId, AdapterInfo, Bootstrap, Session, SessionSummary, Task, TaskMode, TaskStatus } from '../shared/types.ts';
@@ -38,10 +39,14 @@ const examples = [
   { icon: ShieldCheck, label: '体验任务审批', description: '先看计划，再由你决定是否执行', prompt: '请演示一个需要我批准后才会继续的任务。', mode: 'approval-demo' as TaskMode },
 ];
 
+class ApiFailure extends Error {
+  status: number;
+  constructor(message: string, status: number) { super(message); this.status = status; }
+}
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(path, { ...options, headers: { 'Content-Type': 'application/json', ...options.headers } });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || `请求失败（${response.status}）`);
+  if (!response.ok) throw new ApiFailure(data.error || `请求失败（${response.status}）`, response.status);
   return data as T;
 }
 function errorText(error: unknown) { return error instanceof Error ? error.message : '暂时无法完成请求，请重试。'; }
@@ -70,13 +75,19 @@ export default function App() {
   const [sessionError, setSessionError] = useState('');
   const [streamStatus, setStreamStatus] = useState<StreamStatus>('connecting');
   const [online, setOnline] = useState(navigator.onLine);
-  const [view, setView] = useState<'chat' | 'channels' | 'inbox'>('chat');
+  const [view, setView] = useState<'chat' | 'channels' | 'inbox' | 'activity'>('chat');
   const [panel, setPanel] = useState<Panel>(null);
   const [adapterId, setAdapterId] = useState<AdapterId>('mock-codex');
   const [draft, setDraft] = useState('');
   const [mode, setMode] = useState<TaskMode>('chat');
   const [sending, setSending] = useState(false);
   const [actionBusy, setActionBusy] = useState<string | null>(null);
+  const [actionAttempts, setActionAttempts] = useState<Record<string, 'pending' | 'uncertain' | 'waiting'>>({});
+  const [submissions, setSubmissions] = useState<Record<string, string>>({});
+  const [checkingTask, setCheckingTask] = useState(false);
+  const submitBusy = useRef(false);
+  const actionLocks = useRef(new Set<string>());
+  const readTaskBusy = useRef(false);
   const [nativeAttempts, setNativeAttempts] = useState<Record<string, NativeDecisionAttempt>>({});
   const [error, setError] = useState('');
   const [retry, setRetry] = useState(0);
@@ -100,6 +111,11 @@ export default function App() {
   const currentNotice = isNative ? nativeNotice : isReal ? realNotice : isMock ? mockNotice : '正在读取适配器配置。';
   const currentRestrictions = isNative ? nativeRestrictions : realRestrictions;
   const nativeTask = currentTask ?? newestTask;
+  const freshConnection = online && (!selectedId || streamStatus === 'connected');
+  const pendingSubmission = selectedId ? submissions[selectedId] : undefined;
+  const uncertainSubmission = !!pendingSubmission && !tasks.some((task) => task.idempotencyKey === pendingSubmission);
+  const cancelLocked = currentTask ? !!actionAttempts[`${currentTask.id}/cancel`] : false;
+  const mutationBlocked = !freshConnection || uncertainSubmission;
 
   const refreshSessions = useCallback(async () => {
     const request = ++listRequest.current;
@@ -194,34 +210,65 @@ export default function App() {
   async function submit(event: FormEvent) {
     event.preventDefault();
     const prompt = draft.trim();
-    if (!prompt || sending || currentTask || !online || !bootstrap || !currentAdapter?.available || (selectedId && !current)) return;
+    if (!prompt || submitBusy.current || uncertainSubmission || currentTask || !freshConnection || !bootstrap || !currentAdapter?.available || (selectedId && !current)) return;
     const epoch = navigation.current;
     const taskMode = isMock ? mode : 'chat';
     let targetId = selectedId;
+    submitBusy.current = true;
     setSending(true);
     setError('');
+    let taskRequested = false;
+    let idempotencyKey = '';
     try {
       if (!targetId) {
         const result = await api<{ session: Session }>('/api/sessions', { method: 'POST', body: JSON.stringify({ adapterId }) });
         targetId = result.session.id;
         if (navigation.current === epoch) { setSelectedId(targetId); setSession(result.session); }
       }
-      await api<{ task: Task }>(`/api/sessions/${encodeURIComponent(targetId)}/tasks`, { method: 'POST', body: JSON.stringify({ prompt, mode: taskMode }) });
+      idempotencyKey = crypto.randomUUID();
+      taskRequested = true;
+      await api<{ task: Task }>(`/api/sessions/${encodeURIComponent(targetId)}/tasks`, { method: 'POST', body: JSON.stringify({ prompt, mode: taskMode, idempotencyKey }) });
       if (navigation.current === epoch) { setDraft(''); setMode('chat'); stickToBottom.current = true; }
       void refreshSessions();
-    } catch (reason) { if (navigation.current === epoch) setError(errorText(reason)); }
-    finally { setSending(false); }
+    } catch (reason) {
+      if (taskRequested && targetId && !(reason instanceof ApiFailure && reason.status >= 400 && reason.status < 500)) {
+        setSubmissions((previous) => ({ ...previous, [targetId!]: idempotencyKey }));
+        if (navigation.current === epoch) setError('任务提交结果尚未确认。不会自动重发；请读取最新状态核对。');
+      } else if (navigation.current === epoch) setError(errorText(reason));
+    } finally { submitBusy.current = false; setSending(false); void refreshSessions(); }
   }
   async function taskAction(task: Task, action: 'approve' | 'cancel') {
-    if (actionBusy || task.status === 'cancelling' || task.status === 'unknown' || task.stopUnconfirmed || (action === 'approve' && !isMock)) return;
-    setActionBusy(task.id);
-    setError('');
+    const lock = `${task.id}/${action}`;
+    if (actionLocks.current.has(lock) || mutationBlocked || task.status === 'cancelling' || task.status === 'unknown' || task.stopUnconfirmed || (action === 'approve' && !isMock)) return;
+    actionLocks.current.add(lock);
+    setActionAttempts((previous) => ({ ...previous, [lock]: 'pending' }));
+    setActionBusy(task.id); setError('');
     const epoch = navigation.current;
     try {
       await api(`/api/tasks/${encodeURIComponent(task.id)}/${action}`, { method: 'POST', body: '{}' });
+      setActionAttempts((previous) => ({ ...previous, [lock]: 'waiting' }));
       void refreshSessions();
+    } catch (reason) {
+      if (reason instanceof ApiFailure && reason.status >= 400 && reason.status < 500) {
+        actionLocks.current.delete(lock);
+        setActionAttempts((previous) => { const next = { ...previous }; delete next[lock]; return next; });
+        if (navigation.current === epoch) setError(errorText(reason));
+      } else {
+        setActionAttempts((previous) => ({ ...previous, [lock]: 'uncertain' }));
+        if (navigation.current === epoch) setError('这次操作的结果尚未确认。不会重复提交，请读取最新状态。');
+      }
+    } finally { setActionBusy(null); }
+  }
+  async function checkTaskState() {
+    if (!current || readTaskBusy.current) return;
+    readTaskBusy.current = true; setCheckingTask(true);
+    const epoch = navigation.current;
+    const startedWith = current;
+    try {
+      const result = await api<{ session: Session }>(`/api/sessions/${encodeURIComponent(current.id)}`);
+      if (navigation.current === epoch && result.session.id === startedWith.id) setSession((previous) => previous === startedWith ? result.session : previous);
     } catch (reason) { if (navigation.current === epoch) setError(errorText(reason)); }
-    finally { setActionBusy(null); }
+    finally { readTaskBusy.current = false; setCheckingTask(false); }
   }
   function fillExample(example: typeof examples[number]) {
     setDraft(example.prompt); setMode(isMock ? example.mode : 'chat'); composer.current?.focus();
@@ -236,7 +283,7 @@ export default function App() {
     <div className="brand"><span className="brand-mark"><Waypoints size={23} strokeWidth={2.2} /></span><span>RelayDesk<span className="brand-period">.</span></span><span className="version">LOCAL</span></div>
     <div className="sidebar-content">
       <button className="new-session" data-testid="new-session" onClick={() => selectSession(null)}><Plus size={18} /> 开启新会话 <span className="new-session-symbol">↗</span></button>
-      <nav aria-label="工作空间"><button className={`nav-item ${view === 'chat' ? 'active' : ''}`} onClick={() => { setView('chat'); setPanel(null); }}><MessageCircle size={18} /><span>对话工作台</span><ChevronRight size={15} /></button><button className={`nav-item ${view === 'channels' ? 'active' : ''}`} onClick={() => { setView('channels'); setPanel(null); }}><Network size={18} /><span>连接与渠道</span><span className="mini-label">预览</span></button><button className={`nav-item ${view === 'inbox' ? 'active' : ''}`} onClick={() => { setView('inbox'); setPanel(null); }}><InboxIcon size={18} /><span>工作收件箱</span><span className="mini-label">模拟</span></button></nav>
+      <nav aria-label="工作空间"><button className={`nav-item ${view === 'chat' ? 'active' : ''}`} onClick={() => { setView('chat'); setPanel(null); }}><MessageCircle size={18} /><span>对话工作台</span><ChevronRight size={15} /></button><button className={`nav-item ${view === 'channels' ? 'active' : ''}`} onClick={() => { setView('channels'); setPanel(null); }}><Network size={18} /><span>连接与渠道</span><span className="mini-label">预览</span></button><button className={`nav-item ${view === 'inbox' ? 'active' : ''}`} onClick={() => { setView('inbox'); setPanel(null); }}><InboxIcon size={18} /><span>工作收件箱</span><span className="mini-label">模拟</span></button><button className={`nav-item ${view === 'activity' ? 'active' : ''}`} data-testid="activity-nav" onClick={() => { setView('activity'); setPanel(null); }}><Activity size={18} /><span>运行动态</span><span className="mini-label">实时</span></button></nav>
       <div className="section-label session-label"><span>最近会话</span><span>{sessions.length > 0 ? sessions.length : '—'}</span></div>
       <div className="session-list" aria-label="最近会话">
         {sessions.map((item) => <button className={`session-item ${item.id === selectedId && view === 'chat' ? 'selected' : ''}`} key={item.id} data-testid="session-item" data-session-id={item.id} onClick={() => selectSession(item.id)} aria-current={item.id === selectedId ? 'page' : undefined}><span className={`session-provider ${item.adapterId.includes('claude') ? 'claude' : ''}`}><ProviderIcon id={item.adapterId} size={16} /></span><span className="session-item-text"><strong>{item.title}</strong><span>{item.lastMessage || '等待第一条消息'}</span></span>{activeStatuses.includes(item.status as TaskStatus) && <span className={`activity-dot ${item.status}`} aria-label={statusLabels[item.status]} />}</button>)}
@@ -253,7 +300,7 @@ export default function App() {
       <div className={`task-state ${newestTask.status}`}><span className="task-state-icon"><StatusIcon status={newestTask.status} size={22} /></span><span className="section-label">当前任务</span><h3 data-testid="task-status" data-status={newestTask.status}>{newestTask.stopUnconfirmed ? '停止状态未确认' : statusLabels[newestTask.status]}</h3><p>{newestTask.stopUnconfirmed ? '尚未确认执行已经停止；不能提交新任务。' : newestTask.status === 'unknown' ? '需读取原生历史核对结果，不会自动重发提示词。' : newestTask.status === 'awaiting_approval' ? '执行已暂停，接下来由你决定。' : newestTask.status === 'running' ? '适配器正在处理你的请求。' : newestTask.status === 'cancelling' ? isNative ? '正在等待原生轮次结束确认。' : '正在等待执行进程退出。' : newestTask.status === 'completed' ? '这一步已完成，随时继续对话。' : newestTask.status === 'failed' ? newestTask.error || '任务未能完成，可以再次尝试。' : newestTask.status === 'cancelled' ? '执行已停止。你可以开始新的任务。' : '请求已接收，即将开始。'}</p><span className="task-id">TASK {newestTask.id.slice(0, 8).toUpperCase()}</span></div>
       <div className="timeline-heading section-label">任务轨迹 <span>{newestTask.events.length} 个状态</span></div>
       <ol className="timeline">{newestTask.events.map((event, index) => <li key={`${event.at}-${index}`}><span className={`timeline-marker ${index === newestTask.events.length - 1 ? 'latest' : ''}`}><StatusIcon status={event.status} size={13} /></span><div><strong>{statusLabels[event.status]}</strong><time>{time(event.at)}</time><p>{event.detail}</p></div></li>)}</ol>
-      {currentTask && (currentTask.status !== 'awaiting_approval' || isNative) && <button className="cancel-task" data-testid="cancel-task" onClick={() => void taskAction(currentTask, 'cancel')} disabled={!!actionBusy || currentTask.status === 'cancelling' || currentTask.status === 'unknown' || currentTask.stopUnconfirmed}><Square size={13} />{currentTask.status === 'cancelling' ? '正在等待停止确认' : currentTask.status === 'unknown' || currentTask.stopUnconfirmed ? '停止状态待核对' : '停止当前任务'}</button>}
+      {currentTask && (currentTask.status !== 'awaiting_approval' || isNative) && <button className="cancel-task" data-testid="cancel-task" onClick={() => void taskAction(currentTask, 'cancel')} disabled={!!actionBusy || mutationBlocked || cancelLocked || currentTask.status === 'cancelling' || currentTask.status === 'unknown' || currentTask.stopUnconfirmed}><Square size={13} />{currentTask.status === 'cancelling' ? '正在等待停止确认' : currentTask.status === 'unknown' || currentTask.stopUnconfirmed ? '停止状态待核对' : '停止当前任务'}</button>}
     </> : <div className="task-empty"><div className="empty-orbit"><Circle size={72} strokeWidth={0.65} /><Clock3 size={23} /><span /><i /></div><h3>每一步，都看得见</h3><p>发送消息后，这里会展示<br />任务进度与执行轨迹。</p><div className="empty-steps"><span><Circle size={10} />接收请求</span><span><Circle size={10} />适配器执行</span><span><Circle size={10} />返回结果</span></div></div>}
     {tasks.length > 1 && <div className="past-tasks"><div className="section-label">本会话任务 <span>{tasks.length}</span></div>{tasks.slice(0, -1).reverse().slice(0, 4).map((task) => <div className="past-task" key={task.id}><StatusIcon status={task.status} size={14} /><span>{task.prompt}</span><span>{statusLabels[task.status]}</span></div>)}</div>}
     <div className="task-panel-bottom"><div className="section-label">本次连接路径</div><div className="connection-route"><span><Monitor size={14} />本地界面</span><ChevronRight size={12} /><span><Server size={14} />本地网关</span></div><div className="adapter-route"><span className="route-line" /><ProviderIcon id={displayedAdapterId} size={15} /><strong>{adapterTitle(currentAdapter)}</strong><span className={`badge ${isMock ? 'simulation' : 'available'}`}>{adapterMode(currentAdapter)}</span></div><div className="privacy-note"><ShieldCheck size={15} /><p>{currentNotice}{isReal && <><br />{currentRestrictions}</>}</p></div></div>
@@ -262,11 +309,11 @@ export default function App() {
   return <div className="app-shell">
     <aside className="sidebar desktop-sidebar" inert={!!panel}>{sidebar}</aside>
     <div className="workspace" inert={!!panel} data-testid="active-stream-state" data-stream-state={streamStatus} data-session-id={selectedId ?? ""}>
-      <header className="topbar"><div className="topbar-location"><button className="icon-button mobile-menu" aria-label="打开会话列表" onClick={() => setPanel('sessions')}><Menu size={20} /></button><span className="desktop-breadcrumb">工作空间 <ChevronRight size={13} /></span><strong>{view === 'chat' ? '对话工作台' : view === 'inbox' ? '工作收件箱 · 模拟' : '连接与渠道'}</strong></div><div className="topbar-actions"><span className={`connection-badge ${!online || bootstrapError ? 'offline' : ''}`}><span className="status-dot" />{!online ? '已离线' : bootstrapError ? '服务未连接' : '本地开发'}</span>{view !== 'inbox' && <button className="icon-button tasks-toggle" aria-label="查看执行动态" onClick={() => setPanel('tasks')}><Activity size={19} />{currentTask && <i className="task-notification" />}</button>}</div></header>
+      <header className="topbar"><div className="topbar-location"><button className="icon-button mobile-menu" aria-label="打开会话列表" onClick={() => setPanel('sessions')}><Menu size={20} /></button><span className="desktop-breadcrumb">工作空间 <ChevronRight size={13} /></span><strong>{view === 'chat' ? '对话工作台' : view === 'inbox' ? '工作收件箱 · 模拟' : view === 'activity' ? '运行动态' : '连接与渠道'}</strong></div><div className="topbar-actions"><span className={`connection-badge ${!online || bootstrapError ? 'offline' : ''}`}><span className="status-dot" />{!online ? '已离线' : bootstrapError ? '服务未连接' : '本地开发'}</span>{view !== 'inbox' && view !== 'activity' && <button className="icon-button tasks-toggle" aria-label="查看执行动态" onClick={() => setPanel('tasks')}><Activity size={19} />{currentTask && <i className="task-notification" />}</button>}</div></header>
       <div className="workspace-body"><main className={`main-panel ${view !== 'chat' ? 'channels-main' : ''}`}>
         {bootstrapError && <div className="error-banner" role="alert"><TriangleAlert size={17} /><span>无法连接本地服务：{bootstrapError}</span><button onClick={() => setRetry((value) => value + 1)}>重试</button></div>}
         {!online && <div className="connection-notice" role="status"><WifiOff size={15} />网络已断开，重新连接后可以继续。</div>}
-        {view === 'channels' ? <Channels bootstrap={bootstrap} /> : view === 'inbox' ? <Inbox /> : <>
+        {view === 'channels' ? <Channels bootstrap={bootstrap} /> : view === 'inbox' ? <Inbox /> : view === 'activity' ? <TaskActivity online={online} onOpenSession={(sessionId) => selectSession(sessionId)} /> : <>
           <div className="chat-heading"><div className="chat-heading-title"><span className={`heading-provider ${current?.adapterId.includes('claude') ? 'claude' : ''}`}><ProviderIcon id={displayedAdapterId} size={19} /></span><div><h1>{current?.title ?? (selectedId ? '正在载入会话…' : '新的会话')}</h1><p>{selectedId && current ? `${providerName(current.adapterId)} · ${current.messages.filter((message) => message.role === 'user').length} 轮对话` : '给想法一个开始的地方'}</p></div></div><span data-testid="adapter-mode" className={`badge ${isMock ? 'simulation' : 'available'}`}><ShieldCheck size={11} />{adapterMode(currentAdapter)}</span></div>
           {selectedId && streamStatus !== 'connected' && !sessionError && <div className="connection-notice" role="status"><LoaderCircle size={14} className="spin" />{streamStatus === 'offline' ? '等待网络恢复…' : current ? '正在重新连接，任务可能仍在运行…' : '正在连接会话…'}</div>}
           <div className="conversation" ref={conversation} onScroll={() => { const el = conversation.current; if (el) { stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 90; setShowScroll(!stickToBottom.current); } }}>
@@ -275,17 +322,18 @@ export default function App() {
               {!selectedId && <div className="provider-section"><div className="section-label">选择你的协作伙伴 <span>模拟与真实执行分别标明</span></div><div className="provider-grid">{(bootstrap?.adapters ?? []).map((adapter) => <ProviderCard key={adapter.id} adapter={adapter} selected={adapterId === adapter.id} onClick={() => { setAdapterId(adapter.id); setMode('chat'); }} />)}{!bootstrap && !bootstrapError && <div className="loading-providers"><LoaderCircle size={17} className="spin" />正在载入适配器…</div>}</div></div>}
               <div className="starter-section"><div className="section-label">不妨从这里开始</div><div className="starter-grid">{examples.filter((example) => isMock || example.mode !== 'approval-demo').map((example) => <button key={example.mode} className="starter-card" onClick={() => fillExample(example)}><example.icon size={19} /><strong>{example.label}<ArrowUp size={14} /></strong><span>{example.description}</span></button>)}</div></div>
             </div> : <div className="messages"><div className="conversation-date"><span />会话记录保存在本机<span /></div>{current.messages.map((message) => <div key={message.id} className={`message message-${message.role}`}><div className={`message-avatar ${current.adapterId.includes('claude') ? 'claude' : ''}`}>{message.role === 'user' ? <span>你</span> : message.role === 'system' ? <CircleHelp size={18} /> : <ProviderIcon id={current.adapterId} size={19} />}</div><div className="message-body"><div className="message-meta"><strong>{message.role === 'user' ? '你' : message.role === 'system' ? '系统' : providerName(current.adapterId)}</strong>{message.role === 'assistant' && <span className={`message-simulation ${isReal ? 'message-real' : ''}`}>{adapterMode(currentAdapter)}</span>}<time>{time(message.createdAt)}</time></div><div className="message-content">{message.content || <span className="typing-dots" aria-label="正在生成回复"><i /><i /><i /></span>}</div></div></div>)}</div>}
-            {isMock && currentTask?.status === 'awaiting_approval' && <div className="approval-card" role="region" aria-label="待审批任务"><span className="approval-icon"><ShieldCheck size={22} /></span><div className="approval-content"><div className="approval-eyebrow">执行前，请你确认 <span>模拟审批</span></div><h3>{currentTask.approval?.title ?? '批准后继续模拟任务'}</h3><p>{currentTask.approval?.description ?? '这只会继续本地演示，不会发送消息或运行外部操作。'}</p><div className="approval-actions"><button className="primary-button" data-testid="approve-task" disabled={!!actionBusy} onClick={() => void taskAction(currentTask, 'approve')}>{actionBusy ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />}批准并继续模拟</button><button className="secondary-button" disabled={!!actionBusy} onClick={() => void taskAction(currentTask, 'cancel')}>取消任务</button></div></div></div>}
-            {isNative && current && nativeTask && <NativeApprovals key={current.id} session={current} task={nativeTask} connected={online && streamStatus === 'connected'} attempts={nativeAttempts} onAttempt={(key, attempt) => setNativeAttempts((previous) => ({ ...previous, [key]: attempt }))} onSession={(snapshot) => setSession((previous) => previous?.id === snapshot.id ? snapshot : previous)} />}
+            {isMock && currentTask?.status === 'awaiting_approval' && <div className="approval-card" role="region" aria-label="待审批任务"><span className="approval-icon"><ShieldCheck size={22} /></span><div className="approval-content"><div className="approval-eyebrow">执行前，请你确认 <span>模拟审批</span></div><h3>{currentTask.approval?.title ?? '批准后继续模拟任务'}</h3><p>{currentTask.approval?.description ?? '这只会继续本地演示，不会发送消息或运行外部操作。'}</p><div className="approval-actions"><button className="primary-button" data-testid="approve-task" disabled={!!actionBusy || mutationBlocked || !!actionAttempts[`${currentTask.id}/approve`]} onClick={() => void taskAction(currentTask, 'approve')}>{actionBusy ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />}批准并继续模拟</button><button className="secondary-button" disabled={!!actionBusy || mutationBlocked || cancelLocked} onClick={() => void taskAction(currentTask, 'cancel')}>取消任务</button></div></div></div>}
+            {isNative && current && nativeTask && <NativeApprovals key={current.id} session={current} task={nativeTask} connected={freshConnection} decisionsBlocked={cancelLocked || uncertainSubmission} attempts={nativeAttempts} onAttempt={(key, attempt) => setNativeAttempts((previous) => ({ ...previous, [key]: attempt }))} onSession={(snapshot) => setSession((previous) => previous?.id === snapshot.id ? snapshot : previous)} />}
             {!isNative && newestTask?.stopUnconfirmed && <div className="inline-task-error" role="status"><TriangleAlert size={16} /><span>停止状态未确认，当前会话不能继续提交任务。请在本机核对执行进程，不能将失败状态视为已经停止。</span></div>}
             {newestTask?.status === 'failed' && <div className="inline-task-error" role="status"><TriangleAlert size={16} /><span>任务失败：{newestTask.error || '请重新尝试。'}</span></div>}
             <div ref={messagesEnd} className="messages-end" />
           </div>
           <div className="composer-area">{currentAdapter && !currentAdapter.available && <div className="connection-notice" role="status">{currentAdapter.reason ?? '此适配器尚未启用，暂时无法继续发送。'}</div>}{showScroll && <button className="scroll-latest" onClick={() => { stickToBottom.current = true; messagesEnd.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }}><ArrowDown size={14} />回到最新消息</button>}{error && <div className="error-banner composer-error" role="alert"><TriangleAlert size={16} /><span>{error}</span><button className="icon-button" aria-label="关闭错误提示" onClick={() => setError('')}><X size={15} /></button></div>}
-            <form className={`composer ${isMock && mode === 'approval-demo' ? 'approval-mode' : ''}`} onSubmit={(event) => void submit(event)}><label className="sr-only" htmlFor="message-input">发送消息</label><textarea id="message-input" data-testid="message-input" ref={composer} value={draft} maxLength={8000} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKey} placeholder={currentTask ? currentTask.status === 'awaiting_approval' ? '请先批准或取消上面的任务…' : '当前任务完成后，即可继续对话…' : `想和 ${providerName(displayedAdapterId)} 聊些什么？`} rows={2} disabled={sending || !!currentTask || !!(selectedId && !current)} /><div className="composer-controls">{isMock ? <button type="button" data-testid="approval-demo" className={`mode-toggle ${mode === 'approval-demo' ? 'enabled' : ''}`} onClick={() => setMode(mode === 'chat' ? 'approval-demo' : 'chat')} aria-pressed={mode === 'approval-demo'} disabled={sending || !!currentTask}><ShieldCheck size={15} />{mode === 'approval-demo' ? '审批演示已开启' : '审批演示'}{mode === 'approval-demo' && <X size={12} />}</button> : <span className="cli-composer-label"><ShieldCheck size={15} />{isNative ? 'AppServer · 原生审批' : isReal ? 'exec · 旧模式 / 文本' : '载入适配器…'}</span>}<div className="composer-right"><span className="character-count">{draft.length > 7600 ? `${draft.length}/8000` : ''}</span>{currentTask && (currentTask.status !== 'awaiting_approval' || isNative) ? <button type="button" className="send-button stop-button" data-testid="cancel-task" aria-label="停止当前任务" onClick={() => void taskAction(currentTask, 'cancel')} disabled={!!actionBusy || currentTask.status === 'cancelling' || currentTask.status === 'unknown' || currentTask.stopUnconfirmed}><Square size={16} fill="currentColor" /></button> : <button className="send-button" data-testid="send-message" aria-label="发送消息" type="submit" disabled={!draft.trim() || sending || !!currentTask || !online || !bootstrap || !currentAdapter?.available || !!(selectedId && !current)}>{sending ? <LoaderCircle className="spin" size={18} /> : <ArrowUp size={20} />}</button>}</div></div></form><div className={`composer-footnote ${isReal ? 'real-footnote' : ''}`}><ShieldCheck size={12} /><span data-testid="adapter-notice">{currentNotice}</span><span className="keyboard-hint">Enter 发送 · Shift + Enter 换行</span></div>{isReal && <details className="execution-boundary"><summary>查看真实执行边界</summary><p>{currentRestrictions}</p></details>}
+            {(uncertainSubmission || (currentTask && (actionAttempts[`${currentTask.id}/cancel`] === 'uncertain' || actionAttempts[`${currentTask.id}/approve`] === 'uncertain'))) && <div className="submission-uncertain" data-testid="submission-uncertain" role="status"><TriangleAlert size={16} /><span>写入结果尚未确认，已暂停重复提交。读取状态不会重新发送任务或执行操作。</span><button className="text-button" data-testid="task-check-state" disabled={checkingTask} onClick={() => void checkTaskState()}>{checkingTask ? '正在读取…' : '读取最新状态'}</button></div>}
+            <form className={`composer ${isMock && mode === 'approval-demo' ? 'approval-mode' : ''}`} onSubmit={(event) => void submit(event)}><label className="sr-only" htmlFor="message-input">发送消息</label><textarea id="message-input" data-testid="message-input" ref={composer} value={draft} maxLength={8000} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKey} placeholder={currentTask ? currentTask.status === 'awaiting_approval' ? '请先批准或取消上面的任务…' : '当前任务完成后，即可继续对话…' : `想和 ${providerName(displayedAdapterId)} 聊些什么？`} rows={2} disabled={sending || uncertainSubmission || !!currentTask || !!(selectedId && !current)} /><div className="composer-controls">{isMock ? <button type="button" data-testid="approval-demo" className={`mode-toggle ${mode === 'approval-demo' ? 'enabled' : ''}`} onClick={() => setMode(mode === 'chat' ? 'approval-demo' : 'chat')} aria-pressed={mode === 'approval-demo'} disabled={sending || !!currentTask}><ShieldCheck size={15} />{mode === 'approval-demo' ? '审批演示已开启' : '审批演示'}{mode === 'approval-demo' && <X size={12} />}</button> : <span className="cli-composer-label"><ShieldCheck size={15} />{isNative ? 'AppServer · 原生审批' : isReal ? 'exec · 旧模式 / 文本' : '载入适配器…'}</span>}<div className="composer-right"><span className="character-count">{draft.length > 7600 ? `${draft.length}/8000` : ''}</span>{currentTask && (currentTask.status !== 'awaiting_approval' || isNative) ? <button type="button" className="send-button stop-button" data-testid="cancel-task" aria-label="停止当前任务" onClick={() => void taskAction(currentTask, 'cancel')} disabled={!!actionBusy || mutationBlocked || cancelLocked || currentTask.status === 'cancelling' || currentTask.status === 'unknown' || currentTask.stopUnconfirmed}><Square size={16} fill="currentColor" /></button> : <button className="send-button" data-testid="send-message" aria-label="发送消息" type="submit" disabled={!draft.trim() || sending || uncertainSubmission || !!currentTask || !freshConnection || !bootstrap || !currentAdapter?.available || !!(selectedId && !current)}>{sending ? <LoaderCircle className="spin" size={18} /> : <ArrowUp size={20} />}</button>}</div></div></form><div className={`composer-footnote ${isReal ? 'real-footnote' : ''}`}><ShieldCheck size={12} /><span data-testid="adapter-notice">{currentNotice}</span><span className="keyboard-hint">Enter 发送 · Shift + Enter 换行</span></div>{isReal && <details className="execution-boundary"><summary>查看真实执行边界</summary><p>{currentRestrictions}</p></details>}
           </div>
         </>}
-      </main>{view !== 'inbox' && <aside className="task-panel desktop-tasks">{taskPanel}</aside>}</div>
+      </main>{view !== 'inbox' && view !== 'activity' && <aside className="task-panel desktop-tasks">{taskPanel}</aside>}</div>
     </div>
     {panel && <div className="drawer-layer"><button className="drawer-backdrop" aria-label="关闭面板" onClick={() => setPanel(null)} /><div ref={drawer} role="dialog" aria-modal="true" aria-label={panel === 'sessions' ? '会话导航' : '执行动态'} className={`mobile-drawer ${panel === 'sessions' ? 'sidebar' : 'task-panel task-drawer'}`}><button className="icon-button drawer-close" aria-label="关闭面板" onClick={() => setPanel(null)}><X size={20} /></button>{panel === 'sessions' ? sidebar : taskPanel}</div></div>}
   </div>;

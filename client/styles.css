@@ -3794,3 +3794,125 @@ svg {
     flex: 1;
   }
 }
+
+/* Actual AppServer task metadata, independent of synthetic inbox projects. */
+.activity-page { width: min(1080px, 100%); margin: 0 auto; padding: 38px 42px 28px; color: var(--ink); }
+.activity-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 28px; }
+.activity-eyebrow { display: flex; align-items: center; gap: 7px; color: var(--teal); font-size: 10px; font-weight: 700; letter-spacing: .13em; }
+.activity-heading h1 { margin: 13px 0 10px; font-size: 29px; font-weight: 650; letter-spacing: -.045em; }
+.activity-heading h1 span { display: block; margin-top: 8px; color: #8c938d; font-size: 17px; font-weight: 400; letter-spacing: -.02em; }
+.activity-heading p { margin: 0; color: #7c8680; font-size: 12px; line-height: 1.8; }
+.activity-heading > .badge { margin-top: 3px; flex-shrink: 0; }
+.activity-tabs { display: flex; gap: 4px; padding: 5px; background: #eaece6; border-radius: 12px; width: fit-content; margin-bottom: 23px; }
+.activity-tabs button { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 25px; border: 0; border-radius: 9px; color: #7a847e; background: transparent; font-size: 12px; font-weight: 600; cursor: pointer; }
+.activity-tabs button.selected { color: #286753; background: #fffefa; box-shadow: 0 2px 8px #354d3610; }
+.activity-summary { display: grid; grid-template-columns: 100px 100px 1fr; padding: 20px 23px; border: 1px solid #e0e5dc; background: #fffefb; border-radius: 15px; margin-bottom: 22px; gap: 20px; }
+.activity-summary > div:not(.activity-connection) { display: flex; flex-direction: column; gap: 5px; }
+.activity-summary > div > span { color: #808a81; font-size: 11px; }
+.activity-summary strong { color: #334b3b; font-size: 27px; font-weight: 550; font-variant-numeric: tabular-nums; }
+.activity-connection { display: flex; align-items: center; gap: 10px; color: #3f7a5e; border-left: 1px solid #e7e9e1; padding-left: 26px; }
+.activity-summary .activity-connection > span { color: #416a53; font-size: 12px; font-weight: 600; }
+.activity-connection small { display: block; margin-top: 5px; color: #899087; font-size: 10px; font-weight: 400; }
+.activity-connection .icon-button { margin-left: auto; flex-shrink: 0; }
+.activity-connection.disconnected, .activity-summary .activity-connection.disconnected > span { color: #987347; }
+.activity-filter { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.activity-filter label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #596b5d; }
+.activity-filter select { color: #465e4c; border: 1px solid #dfe5da; background: #fffefa; border-radius: 8px; padding: 8px 30px 8px 10px; font: inherit; font-size: 12px; max-width: 100%; min-width: 165px; }
+.activity-filter > span { color: #8b9287; font-size: 11px; margin-left: auto; }
+.activity-boundary { color: #899187; line-height: 1.75; font-size: 11px; margin: 12px 0 19px; }
+.activity-empty { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 57px 22px; color: #799482; border: 1px dashed #dbe2d7; border-radius: 16px; background: #ffffff50; }
+.activity-empty h2 { font-size: 16px; font-weight: 550; color: #637463; margin: 20px 0 8px; }
+.activity-empty p { max-width: 390px; font-size: 12px; line-height: 1.9; color: #90968c; margin: 0; }
+.activity-task-list { display: flex; flex-direction: column; gap: 16px; }
+.activity-task { border: 1px solid #e1e5db; border-radius: 15px; padding: 21px 23px 0; background: #fffefa; overflow: hidden; }
+.activity-task-awaiting_approval { border-color: #decfae; }
+.activity-task-unknown { border-color: #dcc8b3; }
+.activity-task-heading { display: flex; align-items: center; gap: 13px; }
+.activity-task-icon { width: 40px; height: 42px; flex-shrink: 0; display: grid; place-items: center; border-radius: 12px; background: #eaf1e8; color: #57866a; }
+.activity-task-heading > div { min-width: 0; flex: 1; }
+.activity-project { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; color: #8d968a; font-size: 10px; line-height: 1.5; }
+.activity-project i { display: inline-block; width: 3px; height: 3px; border-radius: 50%; background: #b7bfb1; margin: 0 3px; }
+.activity-task h2 { margin: 5px 0 0; font-size: 15px; color: #3c4d3b; font-weight: 600; overflow-wrap: anywhere; }
+.activity-status { color: #66816b; background: #f0f3ec; border-radius: 6px; padding: 6px 9px; font-size: 10px; flex-shrink: 0; }
+.activity-status.awaiting_approval, .activity-status.unknown, .activity-status.cancelling { color: #96703c; background: #f7efdF; }
+.activity-status.failed { color: #ad6963; background: #f7eae6; }
+.activity-current { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 21px 0 17px; }
+.activity-current > strong { color: #5a6e59; font-size: 13px; font-weight: 500; }
+.activity-indicator { width: 6px; height: 6px; border-radius: 50%; background: #aeb9a8; }
+.activity-indicator.live { background: #448a63; box-shadow: 0 0 0 4px #4f906317; }
+.activity-approval-count { display: flex; align-items: center; gap: 5px; margin-left: auto; color: #95723e; font-size: 11px; }
+.activity-task-times { display: grid; grid-template-columns: .9fr 1.3fr 1.3fr; gap: 13px; margin: 0; padding: 14px 0 17px; border-top: 1px solid #edf0e7; }
+.activity-task-times dt { color: #92988d; font-size: 10px; margin-bottom: 7px; }
+.activity-task-times dd { margin: 0; color: #64725d; font-size: 12px; font-variant-numeric: tabular-nums; }
+.activity-task-times dd small { display: block; margin-top: 4px; color: #92958c; font-size: 10px; }
+.activity-quiet, .activity-unknown { display: flex; align-items: flex-start; gap: 7px; font-size: 11px; line-height: 1.7; color: #9a825f; margin: 0 0 15px; }
+.activity-quiet svg, .activity-unknown svg { flex-shrink: 0; margin-top: 3px; }
+.activity-task-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 0; border-top: 1px solid #edf0e7; }
+.activity-task-actions .text-button { display: flex; align-items: center; gap: 5px; font-size: 11px; color: #85907f; }
+.activity-task-actions .secondary-button { font-size: 11px; padding: 8px 11px; }
+.activity-log { margin: 0 -23px; padding: 18px 23px; border-top: 1px solid #e6eade; background: #f7f8f2; }
+.activity-log-label { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 7px; color: #6f8067; font-size: 11px; font-weight: 600; }
+.activity-log-label span { color: #9da392; font-size: 10px; font-weight: 400; }
+.activity-log ol { list-style: none; padding: 0; margin: 13px 0 0; max-height: 350px; overflow: auto; }
+.activity-log li { display: grid; grid-template-columns: 38px 1fr auto; gap: 9px; padding: 10px 0; border-bottom: 1px solid #e7ebdf; color: #819074; font-size: 11px; }
+.activity-log li span { color: #a3ad97; font: 10px ui-monospace, SFMono-Regular, monospace; }
+.activity-log li strong { font-weight: 400; overflow-wrap: anywhere; }
+.activity-log li time { color: #8c967f; font-size: 10px; font-variant-numeric: tabular-nums; }
+.activity-log p { color: #8a957e; font-size: 11px; line-height: 1.7; }
+.activity-log .text-button { font-size: 11px; padding: 10px 0; }
+.activity-load-more { display: flex; margin: 20px auto; font-size: 12px; }
+.activity-page-error { color: #9a6557; font-size: 12px; }
+.activity-footer { display: flex; align-items: flex-start; gap: 6px; color: #919b87; font-size: 10px; line-height: 1.8; margin: 23px 0 0; }
+.activity-footer svg { flex-shrink: 0; margin-top: 2px; }
+.submission-uncertain { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 7px; margin-bottom: 10px; color: #97754c; font-size: 12px; line-height: 1.8; }
+.submission-uncertain svg { flex-shrink: 0; margin-top: 3px; }
+.submission-uncertain span { flex: 1; min-width: 180px; }
+.submission-uncertain button { margin-left: auto; font-size: 12px; }
+@media (max-width: 1100px) {
+  .activity-page { padding: 30px 26px; }
+  .activity-summary { grid-template-columns: 70px 70px 1fr; gap: 14px; }
+  .activity-connection { padding-left: 18px; }
+}
+@media (max-width: 700px) {
+  .activity-page { padding: 25px 17px; }
+  .activity-heading { gap: 9px; margin-bottom: 22px; }
+  .activity-eyebrow { font-size: 10px; }
+  .activity-heading h1 { font-size: 26px; }
+  .activity-heading h1 span { font-size: 15px; }
+  .activity-heading p, .activity-boundary, .activity-empty p { font-size: 12px; }
+  .activity-heading > .badge { font-size: 10px; }
+  .activity-tabs { width: 100%; }
+  .activity-tabs button { flex: 1; font-size: 13px; padding: 12px; }
+  .activity-summary { grid-template-columns: 1fr 1fr; padding: 17px; gap: 14px; }
+  .activity-summary > div > span { font-size: 12px; }
+  .activity-connection { grid-column: 1 / -1; border-left: none; border-top: 1px solid #e7e9e1; padding: 14px 0 0; }
+  .activity-connection small { font-size: 11px; }
+  .activity-filter label, .activity-filter select { font-size: 12px; }
+  .activity-filter select { flex: 1; min-width: 0; }
+  .activity-filter > span { width: 100%; font-size: 11px; text-align: right; }
+  .activity-empty { padding: 42px 17px; }
+  .activity-task { padding: 17px 15px 0; }
+  .activity-task-heading { flex-wrap: wrap; gap: 10px; align-items: flex-start; }
+  .activity-task-icon { width: 34px; height: 38px; }
+  .activity-task h2 { font-size: 15px; }
+  .activity-status { font-size: 10px; padding: 6px; }
+  .activity-current { gap: 8px; padding: 18px 0 14px; }
+  .activity-current > strong { font-size: 14px; }
+  .activity-approval-count { font-size: 11px; margin-left: 14px; }
+  .activity-task-times { grid-template-columns: 1fr 1fr; gap: 16px 10px; }
+  .activity-task-times > div:first-child { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 12px; }
+  .activity-task-times > div:first-child dt { margin: 0; }
+  .activity-task-times dd { font-size: 12px; line-height: 1.5; }
+  .activity-task-times dt { font-size: 11px; }
+  .activity-quiet, .activity-unknown { font-size: 12px; }
+  .activity-task-actions { flex-wrap: wrap; gap: 8px; }
+  .activity-task-actions .text-button, .activity-task-actions .secondary-button { font-size: 12px; min-height: 40px; }
+  .activity-task-actions .secondary-button { margin-left: auto; }
+  .activity-log { margin: 0 -15px; padding: 17px 15px; }
+  .activity-log-label { font-size: 12px; }
+  .activity-log li { grid-template-columns: 32px 1fr; font-size: 12px; }
+  .activity-log li time { grid-column: 2; font-size: 10px; }
+  .activity-log .text-button, .activity-log p { font-size: 12px; }
+  .activity-footer { font-size: 11px; }
+  .activity-page .icon-button { min-width: 40px; min-height: 40px; }
+}

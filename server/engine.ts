@@ -4,6 +4,8 @@ import { createAdapterRegistry, pause } from './adapters.ts';
 import { SessionStore } from './store.ts';
 import { CodexStopUnconfirmedError } from './codex-adapter.ts';
 import { NativeOutcomeUnknownError } from './codex-app-server.ts';
+import { FeedInputError, makeTaskActivity, makeTaskFeed, recordActivity } from './task-feed.ts';
+import type { FeedQuery } from './task-feed.ts';
 
 const active = new Set<TaskStatus>(['queued', 'running', 'awaiting_approval', 'cancelling']);
 const now = () => new Date().toISOString();
@@ -33,7 +35,10 @@ export class TaskEngine {
   private storageFailure?: HttpError;
   private nativeDriver?: EngineDriver;
   private recovering = new Set<string>();
+  private feedEpoch = randomUUID();
+  private feedVersion = 0;
   onChange: (session: Session) => void = () => {};
+  onFeedChange: () => void = () => {};
 
   constructor(dbPath: string, delayMs = 65, codex?: ExecutionAdapter, options: EngineOptions = {}) {
     this.delayMs = delayMs;
@@ -88,6 +93,13 @@ export class TaskEngine {
     task.status = status;
     task.updatedAt = now();
     task.events.push({ status, at: task.updatedAt, detail });
+    if (status === 'running') task.startedAt ??= task.updatedAt;
+    if (status === 'completed' || status === 'cancelled' || status === 'failed') task.endedAt = task.updatedAt;
+    if (status === 'unknown') delete task.endedAt;
+    if (task.adapterId === 'codex-app-server') {
+      recordActivity(task, status, task.updatedAt);
+      if (task.events.length > 200) task.events.splice(0, task.events.length - 200);
+    }
   }
 
   private save(session: Session) {
@@ -99,6 +111,10 @@ export class TaskEngine {
   }
 
   private publish(session: Session) {
+    if (session.adapterId === 'codex-app-server') {
+      this.feedVersion++;
+      try { this.onFeedChange(); } catch { /* The next fresh feed snapshot remains authoritative. */ }
+    }
     // A disconnected subscriber or UI callback must never take down background execution.
     try { this.onChange(structuredClone(session)); } catch { /* A fresh GET/SSE reconnect can recover. */ }
   }
@@ -159,6 +175,18 @@ export class TaskEngine {
 
   get(id: string): Session { return structuredClone(this.requireSession(id)); }
 
+  taskFeed(query: FeedQuery = {}) {
+    try { return makeTaskFeed(this.sessions.values(), `${this.feedEpoch}:${this.feedVersion}`, query); }
+    catch (error) { if (error instanceof FeedInputError) throw new HttpError(400, error.message); throw error; }
+  }
+
+  taskActivity(id: string, query: { before?: number; limit?: number } = {}) {
+    const { task } = this.requireTask(id);
+    if (task.adapterId !== 'codex-app-server') throw new HttpError(404, '此任务没有原生任务活动记录。');
+    try { return makeTaskActivity(task, query); }
+    catch (error) { if (error instanceof FeedInputError) throw new HttpError(400, error.message); throw error; }
+  }
+
   catalog() { return structuredClone(this.registry.catalog); }
 
   create(adapterId: string, title?: string): Session {
@@ -176,9 +204,17 @@ export class TaskEngine {
     return structuredClone(session);
   }
 
-  submit(sessionId: string, prompt: string, mode: TaskMode): Task {
+  submit(sessionId: string, prompt: string, mode: TaskMode, idempotencyKey?: string): Task {
     this.requireWritable();
     const session = this.requireSession(sessionId);
+    if (idempotencyKey !== undefined) {
+      if (typeof idempotencyKey !== 'string' || !/^[A-Za-z0-9_-]{16,100}$/.test(idempotencyKey)) throw new HttpError(400, '任务幂等键必须为 16–100 个安全字符。');
+      const existing = session.tasks.find(task => task.idempotencyKey === idempotencyKey);
+      if (existing) {
+        if (existing.prompt !== prompt || existing.mode !== mode) throw new HttpError(409, '任务幂等键已用于不同内容。');
+        return structuredClone(existing);
+      }
+    }
     const adapter = this.registry.adapters.get(session.adapterId);
     if (!adapter) throw new HttpError(409, '此会话的执行适配器当前未启用，请检查本地配置。');
     if (adapter.info.kind === 'cli' && this.realPaused) throw new HttpError(409, interruptedReason);
@@ -189,7 +225,9 @@ export class TaskEngine {
     const task: Task = {
       id: randomUUID(), sessionId, adapterId: session.adapterId, prompt, mode, status: 'queued',
       createdAt: timestamp, updatedAt: timestamp, events: [{ status: 'queued', at: timestamp, detail: adapter.info.kind === 'mock' ? '本地模拟任务已排队。' : 'Codex CLI 对话任务已排队。' }],
+      ...(idempotencyKey ? { idempotencyKey } : {}),
     };
+    recordActivity(task, 'queued', timestamp);
     session.tasks.push(task);
     session.messages.push({ id: randomUUID(), role: 'user', content: prompt, taskId: task.id, createdAt: timestamp });
     if (session.title === '新会话' && session.tasks.length === 1) session.title = Array.from(prompt).slice(0, 28).join('');
@@ -255,6 +293,7 @@ export class TaskEngine {
     if (task.status === 'awaiting_approval' && !task.nativeApprovals?.some(item => item.status === 'pending' || item.status === 'responding')) {
       this.transition(task, 'running', '单次审批决定已交给原生执行器，等待执行结果。');
     }
+    if (active.has(task.status)) recordActivity(task, 'approval-resolved');
     this.save(session);
     return structuredClone(session);
   }
@@ -267,6 +306,7 @@ export class TaskEngine {
     if (!task || session.tasks.some(item => active.has(item.status)) || this.controllers.has(task.id) || this.recovering.has(sessionId)) throw new HttpError(409, '当前没有可核验的中断任务，或执行器仍在停止。');
     this.recovering.add(sessionId);
     try {
+      recordActivity(task, 'recovery'); this.save(session);
       const evidence = await this.nativeDriver.recover(session.engineBinding, task.nativeTurnId);
       if (evidence.turnId && evidence.turnId !== task.nativeTurnId) throw new Error('Native turn mismatch.');
       for (const message of evidence.messages) this.upsertNativeMessage(session, task, message.itemId, message.text);
@@ -283,6 +323,7 @@ export class TaskEngine {
       return structuredClone(session);
     } catch (error) {
       task.error = error instanceof Error ? error.message : '无法核验原生线程。';
+      this.transition(task, 'unknown', '原生回合核验未能确认终态。');
       this.save(session);
       throw new HttpError(409, '原生线程核验未完成；执行结果仍未知，不会重试原消息。');
     } finally { this.recovering.delete(sessionId); }
@@ -294,6 +335,8 @@ export class TaskEngine {
       message = { id: randomUUID(), taskId: task.id, nativeItemId: itemId, role: 'assistant', createdAt: now(), content: text };
       session.messages.push(message);
     } else message.content = text;
+    task.updatedAt = now();
+    task.lastActivityAt = task.updatedAt;
   }
 
   private schedule(session: Session, task: Task, approved: boolean) {
@@ -358,10 +401,15 @@ export class TaskEngine {
         native: task.adapterId === 'codex-app-server' ? {
           binding: structuredClone(session.engineBinding),
           onBinding: binding => { session.engineBinding = structuredClone(binding); this.save(session); },
-          onTurn: turnId => { task.nativeTurnId = turnId; this.save(session); },
+          onTurn: turnId => { task.nativeTurnId = turnId; task.updatedAt = now(); this.save(session); },
           upsertMessage: (itemId, text) => {
             if (this.closed || task.status === 'unknown') return;
             this.upsertNativeMessage(session, task, itemId, text); this.save(session);
+          },
+          onActivity: kind => {
+            if (this.closed || !active.has(task.status)) return;
+            if (!['connecting', 'thread-ready', 'turn-started', 'reasoning', 'answering', 'command', 'file-change'].includes(kind)) throw new Error('不支持此原生活动类型。');
+            recordActivity(task, kind); this.save(session);
           },
           onApproval: approval => {
             if (this.closed || signal.aborted || !active.has(task.status)) throw new Error('Task cannot accept approval.');
@@ -375,6 +423,7 @@ export class TaskEngine {
             const approval = task.nativeApprovals?.find(item => item.id === approvalId);
             if (approval?.status === 'pending') approval.status = 'resolved';
             if (task.status === 'awaiting_approval' && !task.nativeApprovals?.some(item => item.status === 'pending' || item.status === 'responding')) this.transition(task, 'running', '原生审批请求已撤下，等待终态。');
+            recordActivity(task, 'approval-resolved');
             this.save(session);
           },
           onTerminal: (status, error) => { nativeTerminal = { status, error }; },

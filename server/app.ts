@@ -2,7 +2,8 @@ import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { extname, join, relative, resolve } from 'node:path';
-import type { Bootstrap, EngineDriver, ExecutionAdapter, NativeApprovalDecision, TaskMode } from '../shared/types.ts';
+import type { Bootstrap, EngineDriver, ExecutionAdapter, NativeApprovalDecision, TaskFeedScope, TaskMode } from '../shared/types.ts';
+import type { FeedQuery } from './task-feed.ts';
 import { adapterCatalog } from './adapters.ts';
 import { HttpError, TaskEngine } from './engine.ts';
 import { InboxService } from './inbox.ts';
@@ -75,12 +76,28 @@ function keys(value: Record<string, unknown>, allowed: string[]) {
   if (Object.keys(value).some(key => !allowed.includes(key))) throw new HttpError(400, '请求包含不支持的字段。');
 }
 
+function queryKeys(query: URLSearchParams, allowed: string[]) {
+  for (const key of query.keys()) if (!allowed.includes(key) || query.getAll(key).length !== 1) throw new HttpError(400, '查询包含重复或不支持的参数。');
+}
+function queryNumber(query: URLSearchParams, key: string): number | undefined {
+  const value = query.get(key);
+  if (value === null) return undefined;
+  if (!/^[1-9]\d{0,15}$/.test(value) || !Number.isSafeInteger(Number(value))) throw new HttpError(400, '查询数值必须为正整数。');
+  return Number(value);
+}
+function feedQuery(query: URLSearchParams, events = false): FeedQuery {
+  queryKeys(query, events ? ['scope', 'limit'] : ['scope', 'limit', 'cursor']);
+  return { ...(query.has('scope') ? { scope: query.get('scope') as TaskFeedScope } : {}), ...(query.has('limit') ? { limit: queryNumber(query, 'limit') } : {}), ...(query.has('cursor') ? { cursor: query.get('cursor')! } : {}) };
+}
+
 /** Codex is an optional internal startup dependency, never an HTTP-provided executable. */
 export function createApp({ dbPath, delayMs = 65, staticDir = resolve('dist'), codex, nativeDriver, acknowledgeInterruptedCodex = false }: { dbPath: string; delayMs?: number; staticDir?: string; codex?: ExecutionAdapter; nativeDriver?: EngineDriver; acknowledgeInterruptedCodex?: boolean }) {
   const engine = new TaskEngine(dbPath, delayMs, codex, { acknowledgeInterruptedCodex, nativeDriver });
   const inbox = new InboxService(dbPath, { delayMs });
   const runtimeBootstrap: Bootstrap = { ...bootstrap, adapters: engine.catalog(), runtime: { ...bootstrap.runtime, agent: nativeDriver ? 'Mac 本地执行器 · Codex App Server 已配置' : codex ? 'Mac 本地执行器 · Codex exec 旧模式已配置' : bootstrap.runtime.agent } };
   const listeners = new Map<string, Set<ServerResponse>>();
+  const feedListeners = new Map<ServerResponse, FeedQuery>();
+  let feedFlush: ReturnType<typeof setTimeout> | undefined;
   const staticFiles = new Map<string, { bytes: Buffer; type: string }>();
   if (existsSync(staticDir)) {
     for (const entry of readdirSync(staticDir, { recursive: true, withFileTypes: true })) {
@@ -96,6 +113,22 @@ export function createApp({ dbPath, delayMs = 65, staticDir = resolve('dist'), c
       response.write(`event: snapshot\ndata: ${JSON.stringify({ session })}\n\n`);
     }
   };
+  const writeFeed = (response: ServerResponse, query: FeedQuery) => {
+    if (response.destroyed || response.writableEnded) return;
+    if (response.writableLength > 256 * 1024) { response.destroy(); return; }
+    const feed = engine.taskFeed(query);
+    response.write(`id: ${feed.revision}\nevent: snapshot\ndata: ${JSON.stringify({ feed })}\n\n`);
+  };
+  engine.onFeedChange = () => {
+    if (!feedListeners.size || feedFlush) return;
+    feedFlush = setTimeout(() => {
+      feedFlush = undefined;
+      for (const [response, query] of feedListeners) {
+        try { writeFeed(response, query); } catch { response.destroy(); }
+      }
+    }, 100);
+    feedFlush.unref();
+  };
   const server = createServer((request, response) => {
     response.setHeader('X-Content-Type-Options', 'nosniff');
     response.setHeader('Referrer-Policy', 'no-referrer');
@@ -104,10 +137,33 @@ export function createApp({ dbPath, delayMs = 65, staticDir = resolve('dist'), c
     void (async () => {
       secureRequest(request);
       let pathname: string;
-      try { pathname = decodeURIComponent(new URL(request.url ?? '/', 'http://localhost').pathname); }
+      let parsedUrl: URL;
+      try { parsedUrl = new URL(request.url ?? '/', 'http://localhost'); pathname = decodeURIComponent(parsedUrl.pathname); }
       catch { throw new HttpError(400, '无效的请求路径。'); }
       const method = request.method ?? 'GET';
       if (method === 'GET' && pathname === '/api/bootstrap') return json(response, 200, { ...runtimeBootstrap, adapters: engine.catalog() });
+      if (method === 'GET' && pathname === '/api/task-feed') return json(response, 200, { feed: engine.taskFeed(feedQuery(parsedUrl.searchParams)) });
+      if (method === 'GET' && pathname === '/api/task-feed/events') {
+        const query = feedQuery(parsedUrl.searchParams, true);
+        engine.taskFeed(query); // Validate before committing stream headers.
+        if (feedListeners.size >= 32) throw new HttpError(429, '任务动态连接过多，请关闭多余页面。');
+        response.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+        response.write('retry: 1500\n');
+        feedListeners.set(response, query);
+        writeFeed(response, query); // Last-Event-ID never replays mutations; always send current first page.
+        const heartbeat = setInterval(() => {
+          if (response.writableLength > 256 * 1024) response.destroy();
+          else response.write(': heartbeat\n\n');
+        }, 15000);
+        heartbeat.unref();
+        response.on('close', () => { clearInterval(heartbeat); feedListeners.delete(response); });
+        return;
+      }
+      const activityRoute = pathname.match(/^\/api\/task-feed\/([^/]+)\/activity$/);
+      if (method === 'GET' && activityRoute) {
+        queryKeys(parsedUrl.searchParams, ['before', 'limit']);
+        return json(response, 200, { activity: engine.taskActivity(activityRoute[1], { before: queryNumber(parsedUrl.searchParams, 'before'), limit: queryNumber(parsedUrl.searchParams, 'limit') }) });
+      }
       if (method === 'GET' && pathname === '/api/inbox') return json(response, 200, { inbox: inbox.snapshot() });
       if (method === 'POST' && pathname === '/api/inbox/demo') {
         keys(await body(request), []);
@@ -156,10 +212,11 @@ export function createApp({ dbPath, delayMs = 65, staticDir = resolve('dist'), c
         }
         if (method === 'POST' && suffix === 'tasks') {
           const data = await body(request);
-          keys(data, ['prompt', 'mode']);
+          keys(data, ['prompt', 'mode', 'idempotencyKey']);
           if (typeof data.prompt !== 'string' || !data.prompt.trim() || data.prompt.length > 8000) throw new HttpError(400, '消息必须为 1–8000 个字符。');
           if (data.mode !== undefined && data.mode !== 'chat' && data.mode !== 'approval-demo') throw new HttpError(400, '不支持此任务模式。');
-          return json(response, 202, { task: engine.submit(id, data.prompt.trim(), (data.mode ?? 'chat') as TaskMode) });
+          if (data.idempotencyKey !== undefined && typeof data.idempotencyKey !== 'string') throw new HttpError(400, '任务幂等键必须是字符串。');
+          return json(response, 202, { task: engine.submit(id, data.prompt.trim(), (data.mode ?? 'chat') as TaskMode, data.idempotencyKey as string | undefined) });
         }
       }
       const nativeApprovalRoute = pathname.match(/^\/api\/tasks\/([^/]+)\/native-approvals\/([^/]+)$/);
@@ -194,6 +251,10 @@ export function createApp({ dbPath, delayMs = 65, staticDir = resolve('dist'), c
     server,
     close(): Promise<void> {
       closing ??= (async () => {
+        clearTimeout(feedFlush);
+        feedFlush = undefined;
+        for (const response of feedListeners.keys()) response.end();
+        feedListeners.clear();
         for (const clients of listeners.values()) for (const response of clients) response.end();
         await new Promise<void>((resolveClose, reject) => {
           if (!server.listening) { resolveClose(); return; }

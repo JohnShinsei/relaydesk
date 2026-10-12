@@ -27,8 +27,8 @@ function dateTime(value: string) {
 }
 
 /** Native approval IDs and previews are provided by the server; no editable command payload is sent. */
-export default function NativeApprovals({ session, task, connected, onSession, attempts, onAttempt }: {
-  session: Session; task: Task; connected: boolean; onSession: (session: Session) => void;
+export default function NativeApprovals({ session, task, connected, onSession, attempts, onAttempt, decisionsBlocked = false }: {
+  session: Session; task: Task; connected: boolean; decisionsBlocked?: boolean; onSession: (session: Session) => void;
   attempts: Record<string, NativeDecisionAttempt>;
   onAttempt: (key: string, attempt: NativeDecisionAttempt) => void;
 }) {
@@ -41,12 +41,14 @@ export default function NativeApprovals({ session, task, connected, onSession, a
   const currentSession = useRef(session);
   const currentTask = useRef(task);
   const currentConnected = useRef(connected);
+  const currentBlocked = useRef(decisionsBlocked);
   const currentAttempts = useRef(attempts);
   const readBusy = useRef(false);
   const recoveringNow = useRef(false);
   currentSession.current = session;
   currentTask.current = task;
   currentConnected.current = connected;
+  currentBlocked.current = decisionsBlocked;
   currentAttempts.current = attempts;
 
   useEffect(() => {
@@ -60,7 +62,7 @@ export default function NativeApprovals({ session, task, connected, onSession, a
     if (alive.current && result.id === startedWith.id && currentSession.current === startedWith) onSession(result);
   }
   function canDecide(approval: NativeApproval, decision: NativeApprovalDecision) {
-    return currentConnected.current && !currentTask.current.stopUnconfirmed &&
+    return currentConnected.current && !currentBlocked.current && !currentTask.current.stopUnconfirmed &&
       ['queued', 'running', 'awaiting_approval'].includes(currentTask.current.status) &&
       approval.status === 'pending' && Date.parse(approval.expiresAt) > Date.now() &&
       approval.allowedDecisions.includes(decision) && !attempted.current.has(approval.id) &&
@@ -98,7 +100,7 @@ export default function NativeApprovals({ session, task, connected, onSession, a
   }
   async function recover() {
     const startedWith = currentSession.current;
-    if (recoveringNow.current || currentTask.current.status !== 'unknown' || !startedWith.engineBinding) return;
+    if (!currentConnected.current || recoveringNow.current || currentTask.current.status !== 'unknown' || !startedWith.engineBinding) return;
     recoveringNow.current = true; setRecovering(true); setError('');
     try {
       const result = await requestSession(`/api/sessions/${encodeURIComponent(startedWith.id)}/recover`, {});
@@ -108,14 +110,14 @@ export default function NativeApprovals({ session, task, connected, onSession, a
   }
 
   return <section className="native-approvals" aria-label="AppServer 原生审批与恢复">
-    {(task.status === 'unknown' || task.stopUnconfirmed) && <div className="native-state-warning" role="status"><TriangleAlert size={19} /><div><strong>{task.stopUnconfirmed ? '停止状态未确认' : '原生任务结果未知'}</strong><p>尚未确认此轮执行已经结束。当前会话不能提交新任务，审批入口也已暂停；不能把断线视为操作已取消。</p>{task.status === 'unknown' && session.engineBinding && <><button className="secondary-button" data-testid="native-recover" onClick={() => void recover()} disabled={recovering}>{recovering ? <LoaderCircle size={15} className="spin" /> : <RefreshCw size={15} />}读取原生历史并恢复状态</button><small>只核对已有原生会话，不会重新发送提示词，也不会重放审批。</small></>}</div></div>}
+    {(task.status === 'unknown' || task.stopUnconfirmed) && <div className="native-state-warning" role="status"><TriangleAlert size={19} /><div><strong>{task.stopUnconfirmed ? '停止状态未确认' : '原生任务结果未知'}</strong><p>尚未确认此轮执行已经结束。当前会话不能提交新任务，审批入口也已暂停；不能把断线视为操作已取消。</p>{task.status === 'unknown' && session.engineBinding && <><button className="secondary-button" data-testid="native-recover" onClick={() => void recover()} disabled={recovering || !connected}>{recovering ? <LoaderCircle size={15} className="spin" /> : <RefreshCw size={15} />}读取原生历史并恢复状态</button><small>只核对已有原生会话，不会重新发送提示词，也不会重放审批。</small></>}</div></div>}
     {error && <div className="error-banner native-error" role="alert"><TriangleAlert size={16} /><span>{error}</span></div>}
     {(task.nativeApprovals ?? []).map((approval) => {
       const pending = approval.status === 'pending';
       const expiry = Date.parse(approval.expiresAt);
       const expired = !Number.isFinite(expiry) || expiry <= now;
       const localAttempt = attempts[`${session.id}/${approval.id}`];
-      const actionable = pending && !expired && !localAttempt && connected && !task.stopUnconfirmed && ['queued', 'running', 'awaiting_approval'].includes(task.status);
+      const actionable = pending && !expired && !localAttempt && connected && !decisionsBlocked && !task.stopUnconfirmed && ['queued', 'running', 'awaiting_approval'].includes(task.status);
       return <article className={`native-approval-card native-approval-${approval.status}`} data-testid="native-approval-card" data-approval-id={approval.id} key={approval.id}>
         <header><span className="native-approval-icon">{approval.kind === 'command' ? <TerminalSquare size={21} /> : <FileDiff size={21} />}</span><div><span className="native-eyebrow">APPSERVER · 原生操作审批</span><h3>{approval.kind === 'command' ? '核对这一次执行操作' : '核对这一次文件变更'}</h3></div><span className="badge native-badge">真实操作</span></header>
         <div className="native-operation"><span className="section-label">固定操作内容</span><pre>{approval.operation}</pre></div>
@@ -123,6 +125,7 @@ export default function NativeApprovals({ session, task, connected, onSession, a
         {!!approval.changes?.length && <div className="native-changes"><span className="section-label">待确认的文件变更 <span>{approval.changes.length} 个文件</span></span>{approval.changes.map((change, index) => <div className="native-change" key={`${change.path}-${index}`}><h4>{change.path}</h4><pre>{change.diff}</pre></div>)}</div>}
         <details className="native-request-binding"><summary>请求绑定信息</summary><dl><div><dt>审批记录</dt><dd>{approval.id}</dd></div><div><dt>原生会话</dt><dd>{approval.threadId}</dd></div><div><dt>轮次</dt><dd>{approval.turnId}</dd></div><div><dt>操作项</dt><dd>{approval.itemId}</dd></div>{approval.decidedAt && <div><dt>决定时间</dt><dd>{dateTime(approval.decidedAt)}</dd></div>}</dl></details>
         <div className="native-approval-state" data-testid="native-approval-status" data-status={approval.status} role="status"><ShieldCheck size={15} /><span>{pending && expired ? '请求已过期，不能批准' : pending && localAttempt === 'submitting' ? '正在提交这次决定' : pending && localAttempt ? '决定已提交，等待核对结果' : approvalLabels[approval.status]}</span></div>
+        {pending && decisionsBlocked && <p className="native-approval-note">另一项任务操作正在等待结果核对，当前审批决定已暂停。</p>}
         {pending && !connected && <p className="native-approval-note">连接已中断或正在恢复。收到新的会话快照后，才能确认当前审批仍然有效。</p>}
         {pending && localAttempt && <p className="native-approval-note">这条请求不会重复提交决定。读取状态仅获取当前记录，不会批准或重放操作。</p>}
         {pending && !expired && <div className="native-approval-actions">{approval.allowedDecisions.map((decision) => <button key={decision} data-testid={decision === 'accept' ? 'native-approve' : decision === 'decline' ? 'native-decline' : 'native-cancel'} className={decision === 'accept' ? 'primary-button' : 'secondary-button'} disabled={!actionable} onClick={() => void decide(approval.id, decision)}>{decision === 'accept' ? <Check size={14} /> : decision === 'decline' ? <X size={14} /> : <Square size={13} />}{decisionLabels[decision]}</button>)}</div>}

@@ -47,6 +47,7 @@ function makeNativeSession(id: string, approvalOverrides: Partial<NativeApproval
 async function mount(options: {
   sessions?: Session[]; selected?: string; deferredId?: string; bootstrap?: Bootstrap;
   nativeDecision?: 'deferred' | 'drop-response'; recoveredSession?: Session;
+  taskAction?: 'deferred' | 'drop-response'; taskSubmit?: 'drop-response';
 } = {}) {
   const dom = new JSDOM('<!doctype html><div id="root"></div>', { url: 'http://127.0.0.1:4317/' });
   const saved = new Map<string, PropertyDescriptor | undefined>();
@@ -60,6 +61,7 @@ async function mount(options: {
   const sources: FakeEventSource[] = [];
   let resolveDeferred: ((response: Response) => void) | undefined;
   let resolveNativeDecision: (() => void) | undefined;
+  let resolveTaskAction: (() => void) | undefined;
   let root: Root | undefined;
   let taskCounter = 0;
   const response = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } });
@@ -122,6 +124,7 @@ async function mount(options: {
       if (!session) return response({ error: '会话不存在。' }, 404);
       if (method === 'GET') return response({ session });
       if (match[2] && method === 'POST') {
+        if (options.taskSubmit === 'drop-response') throw new TypeError('任务写入回复丢失');
         const task: Task = { id: `task-${++taskCounter}`, sessionId: session.id, adapterId: session.adapterId, prompt: String(body.prompt), mode: body.mode === 'approval-demo' ? 'approval-demo' : 'chat', status: 'queued', createdAt: timestamp, updatedAt: timestamp, events: [{ status: 'queued', at: timestamp, detail: '测试排队' }] };
         session.tasks.push(task);
         session.messages.push({ id: `message-${taskCounter}`, role: 'user', content: task.prompt, createdAt: timestamp, taskId: task.id });
@@ -151,7 +154,12 @@ async function mount(options: {
     if (action) {
       for (const session of sessions.values()) {
         const task = session.tasks.find((item) => item.id === action[1]);
-        if (task) { transition(task, action[2] === 'approve' ? 'running' : 'cancelled'); publish(session); return response({ task }); }
+        if (task) {
+          if (options.taskAction === 'drop-response') throw new TypeError('任务操作回复丢失');
+          const finish = () => { transition(task, action[2] === 'approve' ? 'running' : 'cancelled'); publish(session); return response({ task }); };
+          if (options.taskAction === 'deferred') return new Promise<Response>((resolve) => { resolveTaskAction = () => resolve(finish()); });
+          return finish();
+        }
       }
     }
     return response({ error: `未配置的测试请求 ${method} ${path}` }, 404);
@@ -196,6 +204,7 @@ async function mount(options: {
       await act(async () => publish(session)); await flush();
     },
     async resolveGet(session: Session) { await act(async () => resolveDeferred?.(response({ session }))); await flush(); },
+    async resolveTaskAction() { await act(async () => resolveTaskAction?.()); await flush(); },
     async resolveNativeDecision() { await act(async () => resolveNativeDecision?.()); await flush(); },
     async cleanup() {
       await act(async () => root?.unmount());
@@ -520,5 +529,83 @@ test('React DOM: unknown native turn blocks sending and recovers state without r
     assert.equal(ui.query<HTMLTextAreaElement>('#message-input').disabled, false);
     assert.equal(ui.sessions.get(native.id)!.messages.filter((message) => message.role === 'user').length, 1);
     assert.equal(ui.requests.filter((request) => /\/tasks$/.test(request.path)).length, 0);
+  } finally { await ui.cleanup(); }
+});
+
+
+test('React DOM: task mutations require a fresh snapshot and synchronous cancellation clicks submit once', async () => {
+  const session = makeNativeSession('cancel-once');
+  session.tasks[0].status = 'running';
+  session.tasks[0].nativeApprovals = [];
+  const ui = await mount({ sessions: [session], selected: session.id, bootstrap: nativeBootstrap, taskAction: 'deferred' });
+  try {
+    const source = ui.sources.at(-1)!;
+    await act(async () => source.onerror?.());
+    assert.equal(ui.query<HTMLButtonElement>('[data-testid="cancel-task"]').disabled, true);
+    await ui.click('[data-testid="cancel-task"]');
+    assert.equal(ui.requests.filter((request) => request.path.endsWith('/cancel')).length, 0);
+    await act(async () => source.onopen?.());
+    assert.equal(ui.query<HTMLButtonElement>('[data-testid="cancel-task"]').disabled, true);
+    await ui.publish(session);
+    await act(async () => {
+      const button = ui.query<HTMLButtonElement>('[data-testid="cancel-task"]');
+      button.click(); button.click();
+    });
+    assert.equal(ui.requests.filter((request) => request.path.endsWith('/cancel')).length, 1);
+    await ui.resolveTaskAction();
+    assert.equal(ui.query('[data-testid="task-status"]').getAttribute('data-status'), 'cancelled');
+  } finally { await ui.cleanup(); }
+});
+
+test('React DOM: an uncertain cancel stays locked across navigation and checks with GET before terminal evidence', async () => {
+  const session = makeNativeSession('cancel-unknown');
+  session.tasks[0].status = 'running';
+  const other = makeSession('other-cancel');
+  const ui = await mount({ sessions: [session, other], selected: session.id, bootstrap: nativeBootstrap, taskAction: 'drop-response' });
+  try {
+    await ui.click('[data-testid="cancel-task"]');
+    assert.equal(ui.query<HTMLButtonElement>('[data-testid="cancel-task"]').disabled, true);
+    assert.equal(ui.query<HTMLButtonElement>('[data-testid="native-approve"]').disabled, true);
+    await ui.click('[data-session-id="other-cancel"]');
+    await ui.click('[data-session-id="cancel-unknown"]');
+    assert.equal(ui.query<HTMLButtonElement>('[data-testid="cancel-task"]').disabled, true);
+    const before = ui.requests.length;
+    await ui.click('[data-testid="task-check-state"]');
+    assert.equal(ui.requests.slice(before).every((request) => request.method === 'GET'), true);
+    assert.equal(ui.requests.filter((request) => request.path.endsWith('/cancel')).length, 1);
+    session.tasks[0].status = 'cancelled';
+    await ui.publish(session);
+    assert.equal(ui.query<HTMLTextAreaElement>('#message-input').disabled, false);
+  } finally { await ui.cleanup(); }
+});
+
+test('React DOM: duplicate new submits create one task request and a lost response cannot be replayed', async () => {
+  const ui = await mount({ taskSubmit: 'drop-response' });
+  try {
+    await ui.type('一个只提交一次的任务');
+    await act(async () => {
+      const form = ui.query<HTMLFormElement>('.composer');
+      form.dispatchEvent(new ui.dom.window.Event('submit', { bubbles: true, cancelable: true }));
+      form.dispatchEvent(new ui.dom.window.Event('submit', { bubbles: true, cancelable: true }));
+    });
+    await ui.flush();
+    assert.equal(ui.requests.filter((request) => request.path === '/api/sessions' && request.method === 'POST').length, 1);
+    const taskRequests = () => ui.requests.filter((request) => request.path.endsWith('/tasks') && request.method === 'POST');
+    assert.equal(taskRequests().length, 1);
+    assert.equal(typeof taskRequests()[0].body.idempotencyKey, 'string');
+    assert.ok(ui.query('[data-testid="submission-uncertain"]'));
+    assert.equal(ui.query<HTMLButtonElement>('[data-testid="send-message"]').disabled, true);
+    await ui.click('[data-testid="new-session"]');
+    await ui.click('[data-session-id="created-0"]');
+    assert.equal(ui.query<HTMLTextAreaElement>('#message-input').disabled, true);
+    const before = ui.requests.length;
+    await ui.click('[data-testid="task-check-state"]');
+    assert.equal(ui.requests.slice(before).every((request) => request.method === 'GET'), true);
+    assert.equal(taskRequests().length, 1);
+    const accepted = ui.sessions.get('created-0')!;
+    accepted.tasks.push({ id: 'accepted-once', sessionId: accepted.id, adapterId: accepted.adapterId, prompt: '一个只提交一次的任务', mode: 'chat', status: 'completed', createdAt: timestamp, updatedAt: timestamp, events: [], idempotencyKey: String(taskRequests()[0].body.idempotencyKey) });
+    await ui.publish(accepted);
+    assert.equal(ui.query<HTMLTextAreaElement>('#message-input').disabled, false);
+    assert.equal(ui.dom.window.document.querySelector('[data-testid="submission-uncertain"]'), null);
   } finally { await ui.cleanup(); }
 });
