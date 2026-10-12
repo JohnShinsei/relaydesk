@@ -2,11 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FormEvent, KeyboardEvent, ReactNode } from 'react';
 import {
   Activity, ArrowDown, ArrowRight, ArrowUp, AudioLines, Bot, Check, CheckCheck,
-  ChevronRight, Circle, CircleCheck, CircleHelp, Clock3, Code2, Globe2,
+  ChevronRight, Circle, CircleCheck, CircleHelp, Clock3, Code2, Globe2, Inbox as InboxIcon,
   Layers3, LoaderCircle, Menu, MessageCircle, Monitor, Network, Plus,
   RotateCcw, Server, ShieldCheck, Sparkles, Square, TriangleAlert, Waypoints,
   WifiOff, X,
 } from 'lucide-react';
+import Inbox from './Inbox.tsx';
 import type { AdapterId, AdapterInfo, Bootstrap, Session, SessionSummary, Task, TaskMode, TaskStatus } from '../shared/types.ts';
 
 type Panel = 'sessions' | 'tasks' | null;
@@ -57,7 +58,7 @@ export default function App() {
   const [sessionError, setSessionError] = useState('');
   const [streamStatus, setStreamStatus] = useState<StreamStatus>('connecting');
   const [online, setOnline] = useState(navigator.onLine);
-  const [view, setView] = useState<'chat' | 'channels'>('chat');
+  const [view, setView] = useState<'chat' | 'channels' | 'inbox'>('chat');
   const [panel, setPanel] = useState<Panel>(null);
   const [adapterId, setAdapterId] = useState<AdapterId>('mock-codex');
   const [draft, setDraft] = useState('');
@@ -219,7 +220,7 @@ export default function App() {
     <div className="brand"><span className="brand-mark"><Waypoints size={23} strokeWidth={2.2} /></span><span>RelayDesk<span className="brand-period">.</span></span><span className="version">LOCAL</span></div>
     <div className="sidebar-content">
       <button className="new-session" data-testid="new-session" onClick={() => selectSession(null)}><Plus size={18} /> 开启新会话 <span className="new-session-symbol">↗</span></button>
-      <nav aria-label="工作空间"><button className={`nav-item ${view === 'chat' ? 'active' : ''}`} onClick={() => { setView('chat'); setPanel(null); }}><MessageCircle size={18} /><span>对话工作台</span><ChevronRight size={15} /></button><button className={`nav-item ${view === 'channels' ? 'active' : ''}`} onClick={() => { setView('channels'); setPanel(null); }}><Network size={18} /><span>连接与渠道</span><span className="mini-label">预览</span></button></nav>
+      <nav aria-label="工作空间"><button className={`nav-item ${view === 'chat' ? 'active' : ''}`} onClick={() => { setView('chat'); setPanel(null); }}><MessageCircle size={18} /><span>对话工作台</span><ChevronRight size={15} /></button><button className={`nav-item ${view === 'channels' ? 'active' : ''}`} onClick={() => { setView('channels'); setPanel(null); }}><Network size={18} /><span>连接与渠道</span><span className="mini-label">预览</span></button><button className={`nav-item ${view === 'inbox' ? 'active' : ''}`} onClick={() => { setView('inbox'); setPanel(null); }}><InboxIcon size={18} /><span>工作收件箱</span><span className="mini-label">模拟</span></button></nav>
       <div className="section-label session-label"><span>最近会话</span><span>{sessions.length > 0 ? sessions.length : '—'}</span></div>
       <div className="session-list" aria-label="最近会话">
         {sessions.map((item) => <button className={`session-item ${item.id === selectedId && view === 'chat' ? 'selected' : ''}`} key={item.id} data-testid="session-item" data-session-id={item.id} onClick={() => selectSession(item.id)} aria-current={item.id === selectedId ? 'page' : undefined}><span className={`session-provider ${item.adapterId.includes('claude') ? 'claude' : ''}`}><ProviderIcon id={item.adapterId} size={16} /></span><span className="session-item-text"><strong>{item.title}</strong><span>{item.lastMessage || '等待第一条消息'}</span></span>{activeStatuses.includes(item.status as TaskStatus) && <span className={`activity-dot ${item.status}`} aria-label={statusLabels[item.status]} />}</button>)}
@@ -227,7 +228,7 @@ export default function App() {
         {listError && <button className="list-retry" onClick={() => void refreshSessions()}><RotateCcw size={13} />会话列表连接失败，重试</button>}
       </div>
     </div>
-    <div className="sidebar-bottom"><div className="local-device"><span className="device-icon"><Monitor size={19} /></span><div><strong>本地工作空间</strong><span><i className={`status-dot ${!online || bootstrapError ? 'muted' : ''}`} />{online && !bootstrapError ? 'Mac 执行节点 · 开发版' : '连接暂不可用'}</span></div><ShieldCheck size={16} className="muted-icon" /></div><div className="sidebar-footer"><span>属于你的 AI 工作空间</span><span>v{bootstrap?.runtime.version ?? '0.2.0'}</span></div></div>
+    <div className="sidebar-bottom"><div className="local-device"><span className="device-icon"><Monitor size={19} /></span><div><strong>本地工作空间</strong><span><i className={`status-dot ${!online || bootstrapError ? 'muted' : ''}`} />{online && !bootstrapError ? 'Mac 执行节点 · 开发版' : '连接暂不可用'}</span></div><ShieldCheck size={16} className="muted-icon" /></div><div className="sidebar-footer"><span>属于你的 AI 工作空间</span><span>v{bootstrap?.runtime.version ?? '0.3.0'}</span></div></div>
   </>;
 
   const taskPanel = <>
@@ -245,11 +246,11 @@ export default function App() {
   return <div className="app-shell">
     <aside className="sidebar desktop-sidebar" inert={!!panel}>{sidebar}</aside>
     <div className="workspace" inert={!!panel} data-testid="active-stream-state" data-stream-state={streamStatus} data-session-id={selectedId ?? ""}>
-      <header className="topbar"><div className="topbar-location"><button className="icon-button mobile-menu" aria-label="打开会话列表" onClick={() => setPanel('sessions')}><Menu size={20} /></button><span className="desktop-breadcrumb">工作空间 <ChevronRight size={13} /></span><strong>{view === 'chat' ? '对话工作台' : '连接与渠道'}</strong></div><div className="topbar-actions"><span className={`connection-badge ${!online || bootstrapError ? 'offline' : ''}`}><span className="status-dot" />{!online ? '已离线' : bootstrapError ? '服务未连接' : '本地开发'}</span><button className="icon-button tasks-toggle" aria-label="查看执行动态" onClick={() => setPanel('tasks')}><Activity size={19} />{currentTask && <i className="task-notification" />}</button></div></header>
-      <div className="workspace-body"><main className={`main-panel ${view === 'channels' ? 'channels-main' : ''}`}>
+      <header className="topbar"><div className="topbar-location"><button className="icon-button mobile-menu" aria-label="打开会话列表" onClick={() => setPanel('sessions')}><Menu size={20} /></button><span className="desktop-breadcrumb">工作空间 <ChevronRight size={13} /></span><strong>{view === 'chat' ? '对话工作台' : view === 'inbox' ? '工作收件箱 · 模拟' : '连接与渠道'}</strong></div><div className="topbar-actions"><span className={`connection-badge ${!online || bootstrapError ? 'offline' : ''}`}><span className="status-dot" />{!online ? '已离线' : bootstrapError ? '服务未连接' : '本地开发'}</span>{view !== 'inbox' && <button className="icon-button tasks-toggle" aria-label="查看执行动态" onClick={() => setPanel('tasks')}><Activity size={19} />{currentTask && <i className="task-notification" />}</button>}</div></header>
+      <div className="workspace-body"><main className={`main-panel ${view !== 'chat' ? 'channels-main' : ''}`}>
         {bootstrapError && <div className="error-banner" role="alert"><TriangleAlert size={17} /><span>无法连接本地服务：{bootstrapError}</span><button onClick={() => setRetry((value) => value + 1)}>重试</button></div>}
         {!online && <div className="connection-notice" role="status"><WifiOff size={15} />网络已断开，重新连接后可以继续。</div>}
-        {view === 'channels' ? <Channels bootstrap={bootstrap} /> : <>
+        {view === 'channels' ? <Channels bootstrap={bootstrap} /> : view === 'inbox' ? <Inbox /> : <>
           <div className="chat-heading"><div className="chat-heading-title"><span className={`heading-provider ${current?.adapterId.includes('claude') ? 'claude' : ''}`}><ProviderIcon id={displayedAdapterId} size={19} /></span><div><h1>{current?.title ?? (selectedId ? '正在载入会话…' : '新的会话')}</h1><p>{selectedId && current ? `${providerName(current.adapterId)} · ${current.messages.filter((message) => message.role === 'user').length} 轮对话` : '给想法一个开始的地方'}</p></div></div><span data-testid="adapter-mode" className={`badge ${isMock ? 'simulation' : 'available'}`}><ShieldCheck size={11} />{adapterMode(currentAdapter)}</span></div>
           {selectedId && streamStatus !== 'connected' && !sessionError && <div className="connection-notice" role="status"><LoaderCircle size={14} className="spin" />{streamStatus === 'offline' ? '等待网络恢复…' : current ? '正在重新连接，任务可能仍在运行…' : '正在连接会话…'}</div>}
           <div className="conversation" ref={conversation} onScroll={() => { const el = conversation.current; if (el) { stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 90; setShowScroll(!stickToBottom.current); } }}>
@@ -266,7 +267,7 @@ export default function App() {
             <form className={`composer ${isMock && mode === 'approval-demo' ? 'approval-mode' : ''}`} onSubmit={(event) => void submit(event)}><label className="sr-only" htmlFor="message-input">发送消息</label><textarea id="message-input" data-testid="message-input" ref={composer} value={draft} maxLength={8000} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKey} placeholder={currentTask ? currentTask.status === 'awaiting_approval' ? '请先批准或取消上面的任务…' : '当前任务完成后，即可继续对话…' : `想和 ${providerName(displayedAdapterId)} 聊些什么？`} rows={2} disabled={sending || !!currentTask || !!(selectedId && !current)} /><div className="composer-controls">{isMock ? <button type="button" data-testid="approval-demo" className={`mode-toggle ${mode === 'approval-demo' ? 'enabled' : ''}`} onClick={() => setMode(mode === 'chat' ? 'approval-demo' : 'chat')} aria-pressed={mode === 'approval-demo'} disabled={sending || !!currentTask}><ShieldCheck size={15} />{mode === 'approval-demo' ? '审批演示已开启' : '审批演示'}{mode === 'approval-demo' && <X size={12} />}</button> : <span className="cli-composer-label"><ShieldCheck size={15} />{isReal ? '官方 CLI · 受限只读' : '载入适配器…'}</span>}<div className="composer-right"><span className="character-count">{draft.length > 7600 ? `${draft.length}/8000` : ''}</span>{currentTask && currentTask.status !== 'awaiting_approval' ? <button type="button" className="send-button stop-button" data-testid="cancel-task" aria-label="停止当前任务" onClick={() => void taskAction(currentTask, 'cancel')} disabled={!!actionBusy || currentTask.status === 'cancelling'}><Square size={16} fill="currentColor" /></button> : <button className="send-button" data-testid="send-message" aria-label="发送消息" type="submit" disabled={!draft.trim() || sending || !!currentTask || !online || !bootstrap || !currentAdapter?.available || !!(selectedId && !current)}>{sending ? <LoaderCircle className="spin" size={18} /> : <ArrowUp size={20} />}</button>}</div></div></form><div className={`composer-footnote ${isReal ? 'real-footnote' : ''}`}><ShieldCheck size={12} /><span data-testid="adapter-notice">{currentNotice}</span><span className="keyboard-hint">Enter 发送 · Shift + Enter 换行</span></div>{isReal && <details className="execution-boundary"><summary>查看真实执行边界</summary><p>{realRestrictions}</p></details>}
           </div>
         </>}
-      </main><aside className="task-panel desktop-tasks">{taskPanel}</aside></div>
+      </main>{view !== 'inbox' && <aside className="task-panel desktop-tasks">{taskPanel}</aside>}</div>
     </div>
     {panel && <div className="drawer-layer"><button className="drawer-backdrop" aria-label="关闭面板" onClick={() => setPanel(null)} /><div ref={drawer} role="dialog" aria-modal="true" aria-label={panel === 'sessions' ? '会话导航' : '执行动态'} className={`mobile-drawer ${panel === 'sessions' ? 'sidebar' : 'task-panel task-drawer'}`}><button className="icon-button drawer-close" aria-label="关闭面板" onClick={() => setPanel(null)}><X size={20} /></button>{panel === 'sessions' ? sidebar : taskPanel}</div></div>}
   </div>;

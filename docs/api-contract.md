@@ -1,4 +1,4 @@
-# Local v0.2 API contract
+# Local v0.3 API contract
 
 Only binds 127.0.0.1. Same origin JSON APIs. All JSON errors: `{ error: string }`.
 
@@ -18,3 +18,20 @@ Opt-in Codex uses a fixed local executable, workspace, model and environment sup
 Interrupted real tasks become failed with `stopUnconfirmed: true` on restart; a restart cannot prove an old process is gone. This marker keeps real execution quarantined across subsequent restarts. Only the local startup environment may acknowledge a manual process check through `RELAYDESK_CODEX_ACK_INTERRUPTED=1`, never an HTTP request. A storage write failure stops active execution and makes subsequent mutation requests return 503 until storage is repaired and the service restarted. Any in-memory failure snapshot explicitly indicates it may not have been saved.
 
 Frontend: React + TypeScript + CSS. User-facing language Chinese, RelayDesk brand. Mobile friendly navigation. Initial no fake seeded user sessions. Empty state prompt cards, mock labels prominent, errors visible. Adapter selector available when creating a new conversation, adapters immutable per conversation. Task list/current status and approval cards. Channel view shows all planned connectors honestly.
+
+## Synthetic work inbox
+
+Types are in `shared/inbox.ts`. This feature has no WeChat connection, external sender, model call, or command execution. Project summaries and source links are fixed synthetic examples marked `deterministic-demo`; no incoming message is an instruction to an execution adapter.
+
+Threads and source messages use `projectIds` arrays: a conversation can contain messages for several projects, and a single source can be associated with more than one project. Project requirements, deadlines, questions, and `todos` retain source evidence. These are fixed confirmed demo associations, not AI classification. The current UI displays requirements, deadlines, and questions; no classification-confirmation editor or todo interaction is implemented. Future uncertain classification suggestions must be confirmed separately before becoming project records and never grant send permission.
+
+- `GET /api/inbox` → `{ inbox: InboxSnapshot }`. Initially empty; returns projects, stable threads, source messages, and reply states. The UI polls this read-only endpoint while the inbox is open.
+- `POST /api/inbox/demo` body `{}` → `{ inbox }`, 200. Loads two invented projects and three threads, including distinct contacts with the same display name. Repeated loading preserves the existing demo and delivery records. This is fixture-load deduplication, not a verified live channel event receiver.
+- `POST /api/inbox/replies` body `{ threadId, sourceMessageId, content, idempotencyKey, demoOutcome }` → `{ reply: InboxReply }`, 201 for a new immutable draft, 200 for an existing equivalent reply. `content` is 1–4000 characters, preserved exactly; `idempotencyKey` is 16–100 ASCII letters, digits, `_`, or `-`; `demoOutcome` is `succeeded`, `failed`, or `unknown`. Preparing a draft never sends it. The server validates that the source belongs to the selected thread and derives the account, native thread ID, and target title from stored data.
+- `POST /api/inbox/replies/:id/send` body `{ intent: 'send-reply', confirmReview?: boolean }` → `{ reply }`, 202 when the mock delivery starts, 200 for a reply already submitted. This separate request expresses send intent for the immutable reply ID. Source risk flags or demo keyword rules require `confirmReview: true`; these rules are not complete sensitive-data detection. The route does not accept target or content overrides.
+
+The same idempotency key with different bound content, source, or demo outcome returns 409. An equivalent account/thread/source/content/outcome with another key resolves to the existing reply and records the key alias. A submitted reply is never delivered again. Any reply for the same source already `sending` or `unknown` blocks another send with 409, including changed content or a new key. A failed delivery remains final for that reply; there is no automatic retry. These are conservative local demo semantics, not proof of a real provider's delivery behavior.
+
+`draft → sending → succeeded | failed | unknown`. Authorization and `sending` are saved before the mock sender runs. A success receipt is explicitly prefixed `mock-`. Service restart converts interrupted `sending` to `unknown`. The API offers no retry or unlock for unknown delivery. A save failure returns 503 and freezes inbox writes; an in-memory unknown state says it may not have been saved. Read-only polling can inspect status without sending again.
+
+Inbox data uses a separate SQLite table in the same local database file. Existing AI chat sessions remain separate. All inbox mutations use the same Host, Origin, JSON body size, content-type, and unknown-field checks as chat mutations. The service remains loopback-only and is not a remote authenticated gateway.

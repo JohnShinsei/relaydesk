@@ -5,6 +5,8 @@ import { extname, join, relative, resolve } from 'node:path';
 import type { Bootstrap, ExecutionAdapter, TaskMode } from '../shared/types.ts';
 import { adapterCatalog } from './adapters.ts';
 import { HttpError, TaskEngine } from './engine.ts';
+import { InboxService } from './inbox.ts';
+import type { PrepareInboxReply, SendInboxReply } from '../shared/inbox.ts';
 
 const maxBodyBytes = 32 * 1024;
 const loopbackNames = new Set(['localhost', '127.0.0.1', '[::1]']);
@@ -17,12 +19,11 @@ const bootstrap: Bootstrap = {
   adapters: adapterCatalog,
   channels: [
     { id: 'web', name: 'RelayDesk Web', status: 'local', description: '当前本地网页聊天入口；仅监听本机回环地址。' },
-    { id: 'wechat', name: '微信', status: 'planned', description: '计划评估官方可用入口；尚未连接、读取或发送消息。' },
-    { id: 'qq', name: 'QQ', status: 'planned', description: '计划评估官方机器人接口与适用范围；尚未连接。' },
+    { id: 'wechat', name: '微信', status: 'planned', description: '真实微信未接入；工作收件箱仅使用合成演示消息与本地模拟发送。' },
     { id: 'slack', name: 'Slack', status: 'planned', description: '未来通过官方 API 按授权接收消息，回复需明确批准。' },
     { id: 'email', name: 'Email', status: 'planned', description: '未来按邮箱提供商的官方授权方式接收；尚未读取或发送邮件。' },
   ],
-  runtime: { mode: 'local', agent: 'Mac 本地模拟执行器', gateway: 'local', version: '0.2.0' },
+  runtime: { mode: 'local', agent: 'Mac 本地模拟执行器', gateway: 'local', version: '0.3.0' },
 };
 
 function json(response: ServerResponse, status: number, body: unknown) {
@@ -77,6 +78,7 @@ function keys(value: Record<string, unknown>, allowed: string[]) {
 /** Codex is an optional internal startup dependency, never an HTTP-provided executable. */
 export function createApp({ dbPath, delayMs = 65, staticDir = resolve('dist'), codex, acknowledgeInterruptedCodex = false }: { dbPath: string; delayMs?: number; staticDir?: string; codex?: ExecutionAdapter; acknowledgeInterruptedCodex?: boolean }) {
   const engine = new TaskEngine(dbPath, delayMs, codex, { acknowledgeInterruptedCodex });
+  const inbox = new InboxService(dbPath, { delayMs });
   const runtimeBootstrap: Bootstrap = { ...bootstrap, adapters: engine.catalog(), runtime: { ...bootstrap.runtime, agent: codex ? 'Mac 本地执行器 · Codex CLI 已配置' : bootstrap.runtime.agent } };
   const listeners = new Map<string, Set<ServerResponse>>();
   const staticFiles = new Map<string, { bytes: Buffer; type: string }>();
@@ -106,6 +108,24 @@ export function createApp({ dbPath, delayMs = 65, staticDir = resolve('dist'), c
       catch { throw new HttpError(400, '无效的请求路径。'); }
       const method = request.method ?? 'GET';
       if (method === 'GET' && pathname === '/api/bootstrap') return json(response, 200, { ...runtimeBootstrap, adapters: engine.catalog() });
+      if (method === 'GET' && pathname === '/api/inbox') return json(response, 200, { inbox: inbox.snapshot() });
+      if (method === 'POST' && pathname === '/api/inbox/demo') {
+        keys(await body(request), []);
+        return json(response, 200, { inbox: inbox.seed() });
+      }
+      if (method === 'POST' && pathname === '/api/inbox/replies') {
+        const data = await body(request);
+        keys(data, ['threadId', 'sourceMessageId', 'content', 'idempotencyKey', 'demoOutcome']);
+        const result = inbox.prepare(data as unknown as PrepareInboxReply);
+        return json(response, result.created ? 201 : 200, { reply: result.reply });
+      }
+      const sendRoute = pathname.match(/^\/api\/inbox\/replies\/([^/]+)\/send$/);
+      if (method === 'POST' && sendRoute) {
+        const data = await body(request);
+        keys(data, ['intent', 'confirmReview']);
+        const result = inbox.send(sendRoute[1], data as unknown as SendInboxReply);
+        return json(response, result.started ? 202 : 200, { reply: result.reply });
+      }
       if (method === 'GET' && pathname === '/api/sessions') return json(response, 200, { sessions: engine.list() });
       if (method === 'POST' && pathname === '/api/sessions') {
         const data = await body(request);
@@ -169,6 +189,7 @@ export function createApp({ dbPath, delayMs = 65, staticDir = resolve('dist'), c
           server.close(error => error ? reject(error) : resolveClose());
           server.closeIdleConnections();
         });
+        await inbox.close();
         await engine.close();
       })();
       return closing;
