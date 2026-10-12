@@ -87,7 +87,7 @@ test('Codex invocation uses fixed read-only args, stdin transcript, isolated cwd
   assert.equal(f.calls[0].args.at(-1), '-');
   assert.ok(!f.calls[0].args.some(arg => arg.includes('你好')));
   assert.deepEqual(f.calls[0].args, codexArguments(join(f.directory, 'workspace'), 'allowed-model'));
-  for (const required of ['--strict-config', '--ignore-user-config', '--ephemeral', 'read-only', 'never', 'web_search="disabled"', 'history.persistence="none"', 'notify=[]', 'forced_login_method="chatgpt"', 'shell_environment_policy.inherit="none"', 'remote_plugin']) assert.ok(f.calls[0].args.includes(required), required);
+  for (const required of ['--strict-config', '--ignore-user-config', '--ephemeral', 'read-only', 'never', 'web_search="disabled"', 'history.persistence="none"', 'notify=[]', 'forced_login_method="chatgpt"', 'shell_environment_policy.inherit="none"', 'remote_plugin', 'multi_agent', 'multi_agent_v2']) assert.ok(f.calls[0].args.includes(required), required);
   for (const forbidden of ['--ignore-rules', '--yolo', '--dangerously-bypass-approvals-and-sandbox', 'resume', '--full-auto']) assert.ok(!f.calls[0].args.includes(forbidden));
   assert.deepEqual(f.calls[0].options.env, { HOME: '/local-home', PATH: '/local-bin', CODEX_HOME: '/existing-codex-home' });
   assert.equal(f.children[0].input, codexTranscript(input.history));
@@ -116,7 +116,7 @@ test('malformed events, provider failures, nonzero exits, and missing answers fa
   const scenarios: ((child: FakeChild) => void)[] = [
     child => { child.stdout.write('SECRET invalid JSON\n'); },
     child => { child.event(['SECRET invalid event']); },
-    child => { child.event({ type: 'error', message: 'SECRET user@email.example failure' }); },
+    child => { child.event({ type: 'error', message: 'SECRET user@email.example failure' }); child.close(1); },
     child => { child.event({ type: 'turn.failed', error: { message: 'SECRET failure' } }); },
     child => { child.stderr.write('SECRET token'); child.close(9); },
     child => { child.event({ type: 'turn.completed' }); child.close(); },
@@ -145,26 +145,76 @@ test('unsupported model errors provide a local configuration action without expo
   });
 });
 
-test('CLI diagnostic items fail with sanitized metadata or provider errors rather than a tool-event label', async t => {
-  for (const diagnostic of [
-    { message: 'Model metadata for `gpt-6-astra` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.', expected: /检查或更新 CLI 模型目录/ },
-    { message: 'SECRET diagnostic /private/account user@example.invalid', expected: /Codex 请求失败/ },
+test('nested JSON terminal diagnostics requiring a newer Codex version return a sanitized CLI update hint', async t => {
+  const message = JSON.stringify({
+    type: 'error', status: 400,
+    error: { type: 'invalid_request_error', message: "The 'gpt-6-astra' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again." },
+  });
+  const f = await adapterFixture(t, child => {
+    child.event({ type: 'error', message });
+    child.event({ type: 'turn.failed', error: { message } });
+  });
+  const input = context();
+  await assert.rejects(f.adapter.execute(input), error => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /需要更新版本的官方 Codex CLI/);
+    assert.doesNotMatch(error.message, /gpt-6-astra|invalid_request_error|requires a newer|400/);
+    return true;
+  });
+  assert.deepEqual(input.output, []);
+  assert.deepEqual(f.children[0].signals, ['SIGTERM']);
+});
+
+test('nonterminal CLI diagnostic items permit a successful turn without exposing raw warnings', async t => {
+  for (const message of [
+    'Model metadata for `gpt-6-astra` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.',
+    'SECRET diagnostic /private/account user@example.invalid',
   ]) {
     const f = await adapterFixture(t, child => {
-      child.event({ type: 'item.completed', item: { id: 'diagnostic', type: 'error', message: diagnostic.message } });
+      child.event({ type: 'item.completed', item: { id: 'diagnostic', type: 'error', message } });
       child.event({ type: 'turn.started' });
-      child.event({ type: 'item.completed', item: { id: 'fallback', type: 'agent_message', text: 'fallback must not continue' } });
+      child.event({ type: 'item.completed', item: { id: 'reply', type: 'agent_message', text: 'completed answer' } });
       child.event({ type: 'turn.completed' });
+      child.close();
     });
     const input = context();
-    await assert.rejects(f.adapter.execute(input), error => {
+    await f.adapter.execute(input);
+    assert.deepEqual(input.output, ['completed answer']);
+    assert.deepEqual(f.children[0].signals, []);
+  }
+});
+
+test('a recoverable top-level error waits for terminal success instead of killing the process', async t => {
+  const f = await adapterFixture(t, child => {
+    child.event({ type: 'error', message: 'SECRET reconnecting stream for user@example.invalid' });
+    child.event({ type: 'item.completed', item: { id: 'reply', type: 'agent_message', text: 'reconnected answer' } });
+    child.event({ type: 'turn.completed' });
+    child.close();
+  });
+  const input = context();
+  await f.adapter.execute(input);
+  assert.deepEqual(input.output, ['reconnected answer']);
+  assert.deepEqual(f.children[0].signals, []);
+});
+
+test('diagnostics cannot turn failed, incomplete, nonzero-exit, or timed-out requests into success', async t => {
+  const warning = { type: 'item.completed', item: { id: 'warning', type: 'error', message: 'SECRET Model metadata for `private-model` not found; fallback metadata' } };
+  const scenarios: { run: (child: FakeChild) => void; expected: RegExp }[] = [
+    { run: child => { child.event(warning); child.event({ type: 'turn.failed', error: { message: 'SECRET fatal account error' } }); }, expected: /Codex 请求失败/ },
+    { run: child => { child.event({ type: 'error', message: 'SECRET model private-model is not supported' }); child.close(1); }, expected: /RELAYDESK_CODEX_MODEL/ },
+    { run: child => { child.event({ type: 'error', message: 'SECRET stream error' }); child.event({ type: 'item.completed', item: { id: 'reply', type: 'agent_message', text: 'partial' } }); child.event({ type: 'turn.completed' }); child.close(1); }, expected: /Codex 请求失败/ },
+    { run: child => { child.event(warning); child.close(); }, expected: /未完成有效回复/ },
+    { run: child => { child.event({ type: 'error', message: 'SECRET reconnecting' }); child.close(); }, expected: /Codex 请求失败/ },
+    { run: child => { child.event(warning); }, expected: /超时/ },
+  ];
+  for (const scenario of scenarios) {
+    const f = await adapterFixture(t, scenario.run, { timeoutMs: 20 });
+    await assert.rejects(f.adapter.execute(context()), error => {
       assert.ok(error instanceof Error);
-      assert.match(error.message, diagnostic.expected);
-      assert.doesNotMatch(error.message, /工具事件|Model metadata|gpt-6-astra|SECRET|\/private|user@example/);
+      assert.match(error.message, scenario.expected);
+      assert.doesNotMatch(error.message, /SECRET|private-model|Model metadata/);
       return true;
     });
-    assert.deepEqual(input.output, []);
-    assert.deepEqual(f.children[0].signals, ['SIGTERM']);
   }
 });
 

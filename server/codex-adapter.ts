@@ -8,7 +8,7 @@ import type { ExecutionAdapter, Message } from '../shared/types.ts';
 const disabledFeatures = [
   'shell_tool', 'unified_exec', 'apps', 'plugins', 'browser_use', 'browser_use_external',
   'browser_use_full_cdp_access', 'in_app_browser', 'computer_use', 'image_generation',
-  'multi_agent', 'hooks', 'skill_mcp_dependency_install', 'tool_suggest',
+  'multi_agent', 'multi_agent_v2', 'hooks', 'skill_mcp_dependency_install', 'tool_suggest',
   'workspace_dependencies', 'memories', 'shell_snapshot', 'remote_plugin',
 ];
 const allowedEnvironment = [
@@ -106,6 +106,8 @@ export function createCodexAdapter(options: CodexOptions): ExecutionAdapter {
         let assistantBytes = 0;
         let turnCompleted = false;
         let receivedAnswer = false;
+        let lastProviderError: string | undefined;
+        let metadataWarning = false;
         let settled = false;
         let failure: Error | undefined;
         let killTimer: ReturnType<typeof setTimeout> | undefined;
@@ -143,6 +145,11 @@ export function createCodexAdapter(options: CodexOptions): ExecutionAdapter {
           signal.removeEventListener('abort', onAbort);
           if (error) reject(error); else resolve();
         };
+        const providerError = (message: string) => /requires a newer version of Codex/i.test(message)
+          ? '当前模型需要更新版本的官方 Codex CLI；请在本机更新官方 CLI 后重试。'
+          : /model/i.test(message) && /not supported|unsupported|does not exist/i.test(message)
+            ? 'Codex 未接受当前模型；请在本机检查 CLI 版本、当前登录可用模型与 RELAYDESK_CODEX_MODEL 配置。'
+            : 'Codex 请求失败。请在本地官方 CLI 检查登录、额度、模型配置、网络和版本。';
         const line = (text: string) => {
           if (failure || signal.aborted || !text.trim()) return;
           if (Buffer.byteLength(text) > maxLineBytes) { stop('Codex 输出超出本地限制，进程已停止。'); return; }
@@ -150,12 +157,17 @@ export function createCodexAdapter(options: CodexOptions): ExecutionAdapter {
           try { event = JSON.parse(text); } catch { stop('Codex 返回了无法识别的事件格式，请检查 CLI 版本。'); return; }
           if (!event || typeof event !== 'object' || Array.isArray(event)) { stop('Codex 返回了无法识别的事件格式，请检查 CLI 版本。'); return; }
           const value = event as Record<string, unknown>;
-          if (value.type === 'error' || value.type === 'turn.failed') {
+          if (value.type === 'error') {
+            if (typeof value.message !== 'string') { stop('Codex 返回了未知的事件协议，已停止执行；请检查 CLI 版本。'); return; }
+            // The official dispatcher remains Running on Error notifications (including
+            // recoverable stream errors). Only retain a safe classification until terminal status.
+            lastProviderError = providerError(value.message);
+            return;
+          }
+          if (value.type === 'turn.failed') {
             const nested = value.error && typeof value.error === 'object' ? value.error as Record<string, unknown> : undefined;
             const message = typeof value.message === 'string' ? value.message : typeof nested?.message === 'string' ? nested.message : '';
-            stop(/model/i.test(message) && /not supported|unsupported|does not exist/i.test(message)
-              ? 'Codex 模型与当前 ChatGPT 登录不兼容；请在本机更换已获授权的 RELAYDESK_CODEX_MODEL 配置。'
-              : 'Codex 请求失败。请在本地官方 CLI 检查登录、额度、模型配置、网络和版本。');
+            stop(message ? providerError(message) : lastProviderError ?? providerError(''));
             return;
           }
           if (value.type === 'thread.started' || value.type === 'turn.started') return;
@@ -165,10 +177,13 @@ export function createCodexAdapter(options: CodexOptions): ExecutionAdapter {
           }
           const item = value.item as Record<string, unknown>;
           if (item.type === 'error') {
-            const message = typeof item.message === 'string' ? item.message : '';
-            stop(/model metadata/i.test(message) && /not found|missing/i.test(message)
-              ? 'Codex CLI 缺少当前模型的元数据，已停止执行；请在本机检查或更新 CLI 模型目录。'
-              : 'Codex 请求失败。请在本地官方 CLI 检查登录、额度、模型配置、网络和版本。');
+            if (value.type !== 'item.completed' || typeof item.id !== 'string' || typeof item.message !== 'string') {
+              stop('Codex 返回了未知的事件协议，已停止执行；请检查 CLI 版本。'); return;
+            }
+            // Warning/ConfigWarning/DeprecationNotice use item.completed/error while
+            // continuing execution. No raw diagnostic is retained or emitted.
+            // https://github.com/openai/codex/blob/rust-v0.162.1/codex-rs/exec/src/event_processor_with_jsonl_output.rs
+            metadataWarning ||= /model metadata/i.test(item.message) && /not found|missing/i.test(item.message);
             return;
           }
           if (item.type !== 'agent_message' && item.type !== 'reasoning') {
@@ -220,7 +235,9 @@ export function createCodexAdapter(options: CodexOptions): ExecutionAdapter {
           if (pending) line(pending);
           if (failure) { finish(failure); return; }
           if (code !== 0 || !turnCompleted || !receivedAnswer) {
-            finish(new Error('Codex 未完成有效回复。请在本地官方 CLI 检查登录、额度、模型配置、网络和版本。'));
+            finish(new Error(lastProviderError ?? (metadataWarning
+              ? 'Codex 未完成有效回复；CLI 曾报告模型元数据提示，请检查本地 CLI 状态与模型目录。'
+              : 'Codex 未完成有效回复。请在本地官方 CLI 检查登录、额度、模型配置、网络和版本。')));
           } else finish();
         });
         if (signal.aborted) onAbort();

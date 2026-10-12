@@ -12,7 +12,7 @@ A local-first workspace for AI conversations and approval-driven tasks.
 - 刷新或重启后恢复 SQLite 中的会话、消息和任务。
 - 查看真实 AI、VPS、消息渠道与语音服务的接入状态。
 
-模拟回复是固定规则生成，不使用大模型，也不消耗会员或 API 额度。Codex CLI 适配器已实现，但当前仍受旧 CLI 模型目录及模型可用性问题阻塞，尚未取得成功回复。Claude、远程网关、微信 / QQ / Slack / 邮件、TTS 均未连接。模拟确认按钮只继续本地模拟任务；真实 Codex 会话不提供模拟审批。
+模拟回复是固定规则生成，不使用大模型，也不消耗会员或 API 额度。Codex CLI 适配器已实现，最新真实探测收到官方「当前模型需要更新版本的 Codex」错误，尚未取得成功回复。Claude、远程网关、微信 / QQ / Slack / 邮件、TTS 均未连接。模拟确认按钮只继续本地模拟任务；真实 Codex 会话不提供模拟审批。
 
 ## 本地运行
 

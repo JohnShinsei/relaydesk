@@ -22,7 +22,7 @@
   --disable hooks --disable apps --disable plugins --disable remote_plugin \
   --disable browser_use --disable browser_use_external \
   --disable browser_use_full_cdp_access --disable computer_use \
-  --disable in_app_browser --disable image_generation --disable multi_agent \
+  --disable in_app_browser --disable image_generation --disable multi_agent --disable multi_agent_v2 \
   --disable memories --disable skill_mcp_dependency_install \
   --disable tool_suggest --disable workspace_dependencies \
   -c 'approval_policy="never"' \
@@ -59,6 +59,8 @@ CLI 进程环境采用明确白名单，排除 API key、provider endpoint 覆�
 ## 执行器应有的失败边界
 
 这些是 RelayDesk 的设计要求，并非厂商保证：仅允许识别的文本输出进入聊天；工具执行事件、未知协议、超长行或输出超限均使任务失败并终止进程。检查事件只能检测异常，不能替代执行前的权限限制。取消/超时先终止子进程，再确认退出；未确认停止时不能显示“已停止”。不自动重试可能已成功的请求，以免重复消耗额度。原始 stderr 和认证错误需脱敏，不能回传个人路径、令牌或完整环境。
+
+`exec --json` 的诊断事件不能仅按名称判断为终止。官方 `0.142.2` 与 `0.162.1` 的 JSON processor 将配置/模型元数据警告编码为 `item.completed` 中的 `item.type=error`；顶层 `error` 也可以是进程仍在处理的错误或重连提示。适配器保留脱敏诊断分类，并继续等待 `turn.completed` 或 `turn.failed` 及退出状态。成功必须同时有助手文本、`turn.completed` 和退出码 0；超时仍会终止进程。应用层不会重新提交请求，官方 CLI 在单次进程内的重连受同一超时限制。来源：[官方 JSON 事件处理器](https://github.com/openai/codex/blob/rust-v0.162.1/codex-rs/exec/src/event_processor_with_jsonl_output.rs)。
 
 ## Claude 的当前边界
 
