@@ -7,14 +7,15 @@ import type { AddressInfo } from 'node:net';
 import { setTimeout as sleep } from 'node:timers/promises';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
-import type { Bootstrap, Session, Task, TaskStatus } from '../shared/types.ts';
+import type { Bootstrap, ExecutionAdapter, Session, Task, TaskStatus } from '../shared/types.ts';
 import { createApp } from '../server/app.ts';
 import { SessionStore } from '../server/store.ts';
+import { CodexStopUnconfirmedError } from '../server/codex-adapter.ts';
 
-async function fixture(t: TestContext, options: { delayMs?: number; dbPath?: string; staticDir?: string } = {}) {
+async function fixture(t: TestContext, options: { delayMs?: number; dbPath?: string; staticDir?: string; codex?: ExecutionAdapter } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'relaydesk-test-'));
   const dbPath = options.dbPath ?? join(directory, 'sessions.sqlite');
-  const app = createApp({ dbPath, delayMs: options.delayMs ?? 2, staticDir: options.staticDir ?? join(directory, 'missing-dist') });
+  const app = createApp({ dbPath, delayMs: options.delayMs ?? 2, staticDir: options.staticDir ?? join(directory, 'missing-dist'), codex: options.codex });
   await new Promise<void>(resolve => app.server.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
   t.after(async () => { await app.close(); await rm(directory, { recursive: true, force: true }); });
@@ -60,6 +61,29 @@ test('bootstrap honestly exposes mock adapters and planned channels; sessions st
   assert.equal((await f.api('/api/sessions', { adapterId: 'unknown' })).status, 400);
   assert.equal((await f.api('/api/sessions', { adapterId: 'codex' })).status, 409);
   assert.equal((await f.api('/api/sessions', { adapterId: 'claude' })).status, 409);
+});
+
+test('bootstrap reflects runtime CLI quarantine and HTTP cannot acknowledge an interrupted process', async t => {
+  const codex: ExecutionAdapter = {
+    info: { id: 'codex', kind: 'cli', name: 'Codex CLI', description: 'injected test adapter', available: true },
+    async execute() { throw new CodexStopUnconfirmedError('无法确认 Codex 进程已停止。'); },
+  };
+  const f = await fixture(t, { codex });
+  assert.equal((await f.api<Bootstrap>('/api/bootstrap')).data.adapters.find(info => info.id === 'codex')?.available, true);
+  const session = await f.session('codex');
+  await f.submit(session.id, 'trigger unconfirmed stop');
+  const failed = await f.state(session.id, 'failed');
+  assert.equal(failed.tasks[0].stopUnconfirmed, true);
+  const catalog = (await f.api<Bootstrap>('/api/bootstrap')).data.adapters;
+  assert.equal(catalog.find(info => info.id === 'codex')?.available, false);
+  assert.match(catalog.find(info => info.id === 'codex')!.reason!, /未确认结束/);
+  assert.equal((await f.api('/api/sessions', { adapterId: 'codex', acknowledgeInterruptedCodex: true })).status, 400);
+  assert.equal((await f.api(`/api/sessions/${session.id}/tasks`, { prompt: 'bypass', stopUnconfirmed: false })).status, 400);
+  assert.equal((await f.api('/api/sessions', { adapterId: 'codex' })).status, 409);
+  await f.app.close();
+  const restored = await fixture(t, { dbPath: f.dbPath, codex });
+  assert.equal((await restored.api<Bootstrap>('/api/bootstrap')).data.adapters.find(info => info.id === 'codex')?.available, false);
+  await restored.app.close();
 });
 
 test('both adapters complete contextual streamed turns and persist across restart', async t => {
@@ -228,7 +252,7 @@ test('/fail records a terminal error; users can retry after failure', async t =>
   assert.equal(completed.tasks[0].status, 'failed');
 });
 
-test('restart marks both queued and running tasks failed and never resumes them', async t => {
+test('restart marks queued, running, and cancelling tasks failed and never resumes them', async t => {
   const f = await fixture(t, { delayMs: 100 });
   const session = await f.session();
   await f.submit(session.id, '被重启中断');
@@ -242,9 +266,15 @@ test('restart marks both queued and running tasks failed and never resumes them'
   running.tasks[0].sessionId = running.id;
   running.tasks[0].status = 'running';
   store.save(running);
+  const cancelling = structuredClone(running);
+  cancelling.id = 'restart-cancelling-fixture';
+  cancelling.tasks[0].id = 'restart-cancelling-task';
+  cancelling.tasks[0].sessionId = cancelling.id;
+  cancelling.tasks[0].status = 'cancelling';
+  store.save(cancelling);
   store.close();
   const second = await fixture(t, { dbPath: f.dbPath });
-  for (const id of [session.id, running.id]) {
+  for (const id of [session.id, running.id, cancelling.id]) {
     const failed = await second.state(id, 'failed');
     assert.match(failed.tasks[0].error!, /重启/);
     assert.equal(failed.tasks[0].events.at(-1)?.status, 'failed');

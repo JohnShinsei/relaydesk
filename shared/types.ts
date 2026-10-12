@@ -1,10 +1,10 @@
 export type AdapterId = 'mock-codex' | 'mock-claude' | 'codex' | 'claude';
-export type TaskStatus = 'queued' | 'running' | 'awaiting_approval' | 'completed' | 'cancelled' | 'failed';
+export type TaskStatus = 'queued' | 'running' | 'awaiting_approval' | 'cancelling' | 'completed' | 'cancelled' | 'failed';
 export type TaskMode = 'chat' | 'approval-demo';
 export interface AdapterInfo { id: AdapterId; name: string; description: string; available: boolean; kind: 'mock' | 'cli'; reason?: string }
 export interface ChannelInfo { id: string; name: string; status: 'local' | 'planned'; description: string }
 export interface Message { id: string; role: 'user' | 'assistant' | 'system'; content: string; createdAt: string; taskId: string }
-export interface Task { id: string; sessionId: string; adapterId: AdapterId; prompt: string; mode: TaskMode; status: TaskStatus; createdAt: string; updatedAt: string; error?: string; approval?: { title: string; description: string }; events: { status: TaskStatus; at: string; detail: string }[] }
+export interface Task { id: string; sessionId: string; adapterId: AdapterId; prompt: string; mode: TaskMode; status: TaskStatus; createdAt: string; updatedAt: string; error?: string; stopUnconfirmed?: boolean; approval?: { title: string; description: string }; events: { status: TaskStatus; at: string; detail: string }[] }
 export interface Session { id: string; title: string; adapterId: AdapterId; createdAt: string; updatedAt: string; messages: Message[]; tasks: Task[] }
 export interface SessionSummary { id: string; title: string; adapterId: AdapterId; createdAt: string; updatedAt: string; lastMessage: string; status: TaskStatus | 'idle' }
 export interface Bootstrap { adapters: AdapterInfo[]; channels: ChannelInfo[]; runtime: { mode: 'local'; agent: string; gateway: 'local'; version: string } }

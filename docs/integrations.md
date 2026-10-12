@@ -34,7 +34,7 @@ app-server 当前文档允许已有本地/开源应用继续使用其认证，�
 
 来源：[编程调用](https://code.claude.com/docs/en/headless)、[Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview)、[Remote Control](https://code.claude.com/docs/en/remote-control)、[Channels](https://code.claude.com/docs/en/channels)、[Channels 协议与审批转发](https://code.claude.com/docs/en/channels-reference)。
 
-Anthropic 的当前规则明确：面向 Claude 能力构建产品/服务的开发者应使用 Console API key 或受支持云提供商；第三方不能替用户提供 Claude.ai 登录、代理 Free/Pro/Max 凭据，也不能收集、保存或中转其会话令牌。Agent SDK 文档说明，除非此前获准，第三方产品不能提供 Claude.ai 登录或相应额度。因此“本机官方 CLI 支持订阅”不能推导成“RelayDesk 可以把会员转换成通用 API”。仅检测现有 CLI 并不能解决这个边界。[认证与凭据规则](https://code.claude.com/docs/en/legal-and-compliance)、[Agent SDK 的认证限制](https://code.claude.com/docs/en/agent-sdk/overview)
+Anthropic 当前规则区分原生 CLI 托管与第三方自有认证代理：在符合其条件、使用未修改官方二进制、让最终用户自行官方登录并承担用量的情况下，可以在产品中运行 Claude Code；这不授权 RelayDesk 自行提供 Claude.ai 登录或中转 Free/Pro/Max 凭据。Agent SDK 第三方额度规则仍要求事先获准。当前尚未发现本机 Claude CLI，也没有验证本项目封装是否满足该路径；不承诺会员已接入。[认证与原生托管规则](https://code.claude.com/docs/en/legal-and-compliance)、[Agent SDK 的认证限制](https://code.claude.com/docs/en/agent-sdk/overview)
 
 ## 消息连接器：机器人入口与工作消息监控分别处理
 

@@ -12,6 +12,7 @@ const bootstrap: Bootstrap = {
     { id: 'mock-codex', name: 'Codex 模拟适配器', description: '本地模拟', available: true, kind: 'mock' },
     { id: 'mock-claude', name: 'Claude 模拟适配器', description: '本地模拟', available: true, kind: 'mock' },
     { id: 'codex', name: 'Codex CLI', description: '未接入', available: false, kind: 'cli', reason: '尚未连接真实 CLI' },
+    { id: 'claude', name: 'Claude Code', description: '未安装', available: false, kind: 'cli', reason: 'Claude Code CLI 未安装' },
   ],
   channels: [{ id: 'web', name: '本地网页', status: 'local', description: '仅本机访问' }],
   runtime: { mode: 'local', agent: 'test', gateway: 'local', version: '0.1.0' },
@@ -21,7 +22,7 @@ function makeSession(id: string, title = id, adapterId: AdapterId = 'mock-codex'
   return { id, title, adapterId, createdAt: timestamp, updatedAt: timestamp, messages: [], tasks: [] };
 }
 
-async function mount(options: { sessions?: Session[]; selected?: string; deferredId?: string } = {}) {
+async function mount(options: { sessions?: Session[]; selected?: string; deferredId?: string; bootstrap?: Bootstrap } = {}) {
   const dom = new JSDOM('<!doctype html><div id="root"></div>', { url: 'http://127.0.0.1:4317/' });
   const saved = new Map<string, PropertyDescriptor | undefined>();
   const globals: Record<string, unknown> = {
@@ -72,7 +73,7 @@ async function mount(options: { sessions?: Session[]; selected?: string; deferre
     const method = init?.method ?? 'GET';
     const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
     requests.push({ path, method, body });
-    if (path === '/api/bootstrap') return response(bootstrap);
+    if (path === '/api/bootstrap') return response(options.bootstrap ?? bootstrap);
     if (path === '/api/sessions' && method === 'GET') return response({ sessions: [...sessions.values()].map((session) => ({ ...session, lastMessage: session.messages.at(-1)?.content ?? '', status: session.tasks.at(-1)?.status ?? 'idle' })) });
     if (path === '/api/sessions' && method === 'POST') {
       const session = makeSession(`created-${sessions.size}`, '新会话', body.adapterId as AdapterId);
@@ -248,5 +249,69 @@ test('React DOM: unavailable saved session displays recovery and permits a new c
     await ui.type('新会话可以继续');
     await ui.click('[data-testid="send-message"]');
     assert.equal([...ui.sessions.values()][0].tasks[0].prompt, '新会话可以继续');
+  } finally { await ui.cleanup(); }
+});
+
+test('React DOM: configured real Codex selects CLI, blocks approval demo and waits for cancellation', async () => {
+  const configured: Bootstrap = {
+    ...bootstrap,
+    adapters: bootstrap.adapters.map((adapter) => adapter.id === 'codex'
+      ? { ...adapter, available: true, reason: undefined, description: '官方 CLI 已配置，调用结果以任务状态为准。' }
+      : adapter),
+  };
+  const ui = await mount({ bootstrap: configured });
+  try {
+    await ui.click('[data-testid="approval-demo"]');
+    assert.equal(ui.query('[data-testid="approval-demo"]').getAttribute('aria-pressed'), 'true');
+    await ui.click('[data-adapter-id="codex"]');
+    assert.match(ui.query('[data-adapter-id="codex"]').textContent ?? '', /Codex · CLI/);
+    assert.equal(ui.query('[data-testid="adapter-mode"]').textContent, '真实 · 只读');
+    assert.equal(ui.dom.window.document.querySelector('[data-testid="approval-demo"]'), null);
+    assert.equal(ui.dom.window.document.querySelectorAll('.starter-card').length, 1);
+    assert.match(ui.query('[data-testid="adapter-notice"]').textContent ?? '', /本会话历史发送到官方 Codex/);
+    assert.match(ui.query('[data-testid="adapter-notice"]').textContent ?? '', /按当前账户规则计费或计入额度/);
+    assert.doesNotMatch(ui.query('[data-testid="adapter-notice"]').textContent ?? '', /不会调用真实 AI/);
+    assert.match(ui.query('.execution-boundary').textContent ?? '', /不等同于完整的系统隔离/);
+    await ui.type('请解释这个设计');
+    await ui.click('[data-testid="send-message"]');
+    const session = [...ui.sessions.values()][0];
+    assert.equal(session.adapterId, 'codex');
+    assert.equal(session.tasks[0].mode, 'chat');
+    session.tasks[0].status = 'cancelling';
+    await ui.publish(session);
+    assert.equal(ui.query('[data-testid="task-status"]').getAttribute('data-status'), 'cancelling');
+    assert.match(ui.query('.task-state p').textContent ?? '', /等待执行进程退出/);
+    assert.ok(ui.query<HTMLButtonElement>('.composer [data-testid="cancel-task"]').disabled);
+    assert.ok(ui.query<HTMLTextAreaElement>('#message-input').disabled);
+    await ui.finish(session, '测试夹具中的真实模式结果；不代表真实连接已验证。');
+    assert.equal(ui.query('.message-real').textContent, '真实 · 只读');
+    assert.match(ui.query('.adapter-route').textContent ?? '', /Codex · CLI/);
+    await ui.click('.nav-item:nth-child(2)');
+    const codexCard = [...ui.dom.window.document.querySelectorAll('.integration-card')]
+      .find((card) => card.querySelector('h3')?.textContent === 'Codex CLI');
+    assert.equal(codexCard?.querySelector('.badge')?.textContent, '已配置 · CLI');
+    assert.match(codexCard?.textContent ?? '', /不代表本轮调用已成功/);
+  } finally { await ui.cleanup(); }
+});
+
+test('React DOM: disabled historical Codex retains real labels and cannot send', async () => {
+  const history = makeSession('real-history', '历史 Codex 会话', 'codex');
+  history.messages.push({ id: 'old-reply', role: 'assistant', content: '此前的回复', createdAt: timestamp, taskId: 'old-task' });
+  const ui = await mount({ sessions: [history], selected: history.id });
+  try {
+    assert.equal(ui.query('[data-testid="adapter-mode"]').textContent, '真实 · 只读');
+    assert.equal(ui.query('.message-real').textContent, '真实 · 只读');
+    assert.equal(ui.dom.window.document.querySelector('[data-testid="approval-demo"]'), null);
+    assert.match(ui.query('.composer-area .connection-notice').textContent ?? '', /尚未连接真实 CLI/);
+    await ui.type('当前不应发送');
+    assert.ok(ui.query<HTMLButtonElement>('[data-testid="send-message"]').disabled);
+    await ui.click('[data-testid="send-message"]');
+    assert.equal(ui.requests.filter((request) => request.method === 'POST').length, 0);
+    await ui.click('[data-testid="new-session"]');
+    assert.equal(ui.query('[data-testid="adapter-mode"]').textContent, '模拟');
+    assert.ok(ui.query('[data-testid="approval-demo"]'));
+    assert.ok(ui.query<HTMLButtonElement>('[data-adapter-id="codex"]').disabled);
+    assert.ok(ui.query<HTMLButtonElement>('[data-adapter-id="claude"]').disabled);
+    assert.match(ui.query('[data-adapter-id="claude"]').textContent ?? '', /Claude Code CLI 未安装/);
   } finally { await ui.cleanup(); }
 });

@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { extname, join, relative, resolve } from 'node:path';
-import type { Bootstrap, TaskMode } from '../shared/types.ts';
+import type { Bootstrap, ExecutionAdapter, TaskMode } from '../shared/types.ts';
 import { adapterCatalog } from './adapters.ts';
 import { HttpError, TaskEngine } from './engine.ts';
 
@@ -22,7 +22,7 @@ const bootstrap: Bootstrap = {
     { id: 'slack', name: 'Slack', status: 'planned', description: '未来通过官方 API 按授权接收消息，回复需明确批准。' },
     { id: 'email', name: 'Email', status: 'planned', description: '未来按邮箱提供商的官方授权方式接收；尚未读取或发送邮件。' },
   ],
-  runtime: { mode: 'local', agent: 'Mac 本地模拟执行器', gateway: 'local', version: '0.1.0' },
+  runtime: { mode: 'local', agent: 'Mac 本地模拟执行器', gateway: 'local', version: '0.2.0' },
 };
 
 function json(response: ServerResponse, status: number, body: unknown) {
@@ -74,9 +74,10 @@ function keys(value: Record<string, unknown>, allowed: string[]) {
   if (Object.keys(value).some(key => !allowed.includes(key))) throw new HttpError(400, '请求包含不支持的字段。');
 }
 
-/** No external network, subprocesses, credentials, or account state are used by this application. */
-export function createApp({ dbPath, delayMs = 65, staticDir = resolve('dist') }: { dbPath: string; delayMs?: number; staticDir?: string }) {
-  const engine = new TaskEngine(dbPath, delayMs);
+/** Codex is an optional internal startup dependency, never an HTTP-provided executable. */
+export function createApp({ dbPath, delayMs = 65, staticDir = resolve('dist'), codex, acknowledgeInterruptedCodex = false }: { dbPath: string; delayMs?: number; staticDir?: string; codex?: ExecutionAdapter; acknowledgeInterruptedCodex?: boolean }) {
+  const engine = new TaskEngine(dbPath, delayMs, codex, { acknowledgeInterruptedCodex });
+  const runtimeBootstrap: Bootstrap = { ...bootstrap, adapters: engine.catalog(), runtime: { ...bootstrap.runtime, agent: codex ? 'Mac 本地执行器 · Codex CLI 已配置' : bootstrap.runtime.agent } };
   const listeners = new Map<string, Set<ServerResponse>>();
   const staticFiles = new Map<string, { bytes: Buffer; type: string }>();
   if (existsSync(staticDir)) {
@@ -104,7 +105,7 @@ export function createApp({ dbPath, delayMs = 65, staticDir = resolve('dist') }:
       try { pathname = decodeURIComponent(new URL(request.url ?? '/', 'http://localhost').pathname); }
       catch { throw new HttpError(400, '无效的请求路径。'); }
       const method = request.method ?? 'GET';
-      if (method === 'GET' && pathname === '/api/bootstrap') return json(response, 200, bootstrap);
+      if (method === 'GET' && pathname === '/api/bootstrap') return json(response, 200, { ...runtimeBootstrap, adapters: engine.catalog() });
       if (method === 'GET' && pathname === '/api/sessions') return json(response, 200, { sessions: engine.list() });
       if (method === 'POST' && pathname === '/api/sessions') {
         const data = await body(request);

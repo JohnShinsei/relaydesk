@@ -1,12 +1,22 @@
 import type { AdapterInfo, ExecutionAdapter, ExecutionContext } from '../shared/types.ts';
 
-/** Adapter metadata is explicit: installed or authenticated CLIs are not yet integrated. */
+/** Default catalog; a real Codex entry becomes available only through local startup opt-in. */
 export const adapterCatalog: AdapterInfo[] = [
   { id: 'mock-codex', name: 'Codex · 模拟', description: '本地确定性模拟，验证流式聊天与任务流程；不调用 Codex。', available: true, kind: 'mock' },
   { id: 'mock-claude', name: 'Claude · 模拟', description: '本地确定性模拟，验证第二种执行适配器；不调用 Claude。', available: true, kind: 'mock' },
-  { id: 'codex', name: 'Codex CLI', description: '计划接入官方 CLI / SDK。', available: false, kind: 'cli', reason: '尚未实现官方执行适配器；此版本不使用登录状态或会员额度。' },
+  { id: 'codex', name: 'Codex CLI', description: '可选的官方 CLI 受限只读对话。', available: false, kind: 'cli', reason: '本地未启用 Codex；需要显式配置官方 CLI 路径并使用已有登录。' },
   { id: 'claude', name: 'Claude Code', description: '计划接入官方 CLI / Agent SDK。', available: false, kind: 'cli', reason: '尚未实现官方执行适配器；此版本不使用登录状态或会员额度。' },
 ];
+
+export function createAdapterRegistry(delayMs: number, codex?: ExecutionAdapter) {
+  const adapters = createMockAdapters(delayMs);
+  if (codex) {
+    if (codex.info.id !== 'codex' || codex.info.kind !== 'cli' || !codex.info.available) throw new Error('Invalid internal Codex adapter.');
+    adapters.set('codex', codex);
+  }
+  const catalog = adapterCatalog.map(info => structuredClone(adapters.get(info.id)?.info ?? info));
+  return { adapters, catalog };
+}
 
 export function pause(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
