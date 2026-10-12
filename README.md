@@ -117,6 +117,7 @@ TypeScript の型検査、ESLint、React DOM の操作テスト、バックエ�
 ## 構成と今後の範囲
 
 - [アーキテクチャと段階的な開発計画](docs/architecture.md)
+- [ネイティブ実行基盤と harness 候補の ADR](docs/adr-harness-options.md)
 - [公式の連携方法の調査](docs/integrations.md)
 - [メッセージの双方向連携と返信の設計](docs/messaging-design.md)
 - [API の仕様](docs/api-contract.md)
