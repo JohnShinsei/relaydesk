@@ -1,5 +1,5 @@
-import { spawn } from 'node:child_process';
-import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio, SpawnSyncOptionsWithStringEncoding } from 'node:child_process';
 import { accessSync, constants, mkdirSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
@@ -17,6 +17,10 @@ const allowedEnvironment = [
 ] as const;
 
 type SpawnProcess = (executable: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
+type VersionProbe = (executable: string, args: string[], options: SpawnSyncOptionsWithStringEncoding) => {
+  status: number | null; stdout: string; stderr?: string; signal?: NodeJS.Signals | null; error?: unknown;
+};
+export type CodexVersion = '0.142.2' | '0.162.1';
 export interface CodexOptions {
   executablePath: string;
   workspace: string;
@@ -30,6 +34,8 @@ export interface CodexOptions {
   maxPromptBytes?: number;
   /** Internal test injection only. Never populated from an HTTP request. */
   spawnProcess?: SpawnProcess;
+  /** Internal test injection only. Production always probes the configured executable. */
+  versionProbe?: VersionProbe;
 }
 
 export class CodexStopUnconfirmedError extends Error {}
@@ -38,13 +44,30 @@ export function codexEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return Object.fromEntries(allowedEnvironment.filter(name => env[name] !== undefined).map(name => [name, env[name]]));
 }
 
-export function codexArguments(workspace: string, model?: string): string[] {
+function checkedVersion(executable: string, workspace: string, env: NodeJS.ProcessEnv, probe: VersionProbe): CodexVersion {
+  let result: ReturnType<VersionProbe>;
+  try {
+    result = probe(executable, ['--version'], {
+      cwd: workspace, env, encoding: 'utf8', shell: false, windowsHide: true,
+      timeout: 5000, maxBuffer: 4096, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch { throw new Error('无法验证 Codex CLI 版本；请检查本地可执行文件配置。'); }
+  // CLI startup can print nonfatal PATH warnings on stderr. Never expose those diagnostics.
+  if (result.status !== 0 || result.error || result.signal) throw new Error('无法验证 Codex CLI 版本；请检查本地可执行文件配置。');
+  const version = typeof result.stdout === 'string' ? /^codex-cli (0\.142\.2|0\.162\.1)$/.exec(result.stdout.trim())?.[1] : undefined;
+  if (!version) throw new Error('此 Codex CLI 版本尚未验证；仅支持 0.142.2 和 0.162.1，请检查本地 CLI 路径。');
+  return version as CodexVersion;
+}
+
+export function codexArguments(workspace: string, model: string | undefined, version: CodexVersion): string[] {
   return [
     '-a', 'never', 'exec', '--ignore-user-config', '--strict-config',
     ...disabledFeatures.flatMap(feature => ['--disable', feature]),
     '-c', 'web_search="disabled"', '-c', 'project_doc_max_bytes=0',
     '-c', 'history.persistence="none"', '-c', 'notify=[]', '-c', 'shell_environment_policy.inherit="none"',
     '-c', 'forced_login_method="chatgpt"',
+    // This key is supported by 0.162.1, but is invalid under 0.142.2 strict config.
+    ...(version === '0.162.1' ? ['-c', 'agents.enabled=false'] : []),
     ...(model ? ['--model', model] : []),
     '--ephemeral', '--sandbox', 'read-only', '--skip-git-repo-check',
     '--json', '--color', 'never', '-C', workspace, '-',
@@ -71,6 +94,7 @@ export function createCodexAdapter(options: CodexOptions): ExecutionAdapter {
   accessSync(options.executablePath, constants.X_OK);
   mkdirSync(options.workspace, { recursive: true, mode: 0o700 });
   const environment = codexEnvironment(options.env ?? process.env);
+  const version = checkedVersion(options.executablePath, options.workspace, environment, options.versionProbe ?? spawnSync);
   const timeoutMs = options.timeoutMs ?? 120_000;
   const killGraceMs = options.killGraceMs ?? 1000;
   const stopConfirmationMs = options.stopConfirmationMs ?? 2000;
@@ -95,7 +119,7 @@ export function createCodexAdapter(options: CodexOptions): ExecutionAdapter {
         let child: ChildProcessWithoutNullStreams;
         const detached = process.platform !== 'win32';
         try {
-          child = spawnProcess(options.executablePath, codexArguments(options.workspace, options.model), {
+          child = spawnProcess(options.executablePath, codexArguments(options.workspace, options.model, version), {
             cwd: options.workspace, env: environment, shell: false, detached, windowsHide: true,
           });
         } catch { reject(new Error('无法启动 Codex CLI，请检查本地可执行文件配置。')); return; }
@@ -248,9 +272,9 @@ export function createCodexAdapter(options: CodexOptions): ExecutionAdapter {
 }
 
 /** Opt-in configuration is local only; this function never reads or creates credentials. */
-export function createCodexAdapterFromEnvironment(env: NodeJS.ProcessEnv, workspace: string): ExecutionAdapter | undefined {
+export function createCodexAdapterFromEnvironment(env: NodeJS.ProcessEnv, workspace: string, dependencies: Pick<CodexOptions, 'versionProbe'> = {}): ExecutionAdapter | undefined {
   if (env.RELAYDESK_ENABLE_CODEX !== '1') return undefined;
   const executablePath = env.RELAYDESK_CODEX_PATH;
   if (!executablePath || !isAbsolute(executablePath)) throw new Error('RELAYDESK_CODEX_PATH must be an absolute path to the official Codex CLI.');
-  return createCodexAdapter({ executablePath, workspace, model: env.RELAYDESK_CODEX_MODEL, env });
+  return createCodexAdapter({ executablePath, workspace, model: env.RELAYDESK_CODEX_MODEL, env, ...dependencies });
 }

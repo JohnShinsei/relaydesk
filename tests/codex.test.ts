@@ -58,6 +58,7 @@ async function adapterFixture(t: TestContext, scenario: (child: FakeChild) => vo
   const calls: { executable: string; args: string[]; options: SpawnOptionsWithoutStdio }[] = [];
   const adapter = createCodexAdapter({
     executablePath: process.execPath, workspace: join(directory, 'workspace'), timeoutMs: 1000, killGraceMs: 10,
+    versionProbe: () => ({ status: 0, stdout: 'codex-cli 0.142.2\n' }),
     env: { HOME: '/local-home', PATH: '/local-bin', CODEX_HOME: '/existing-codex-home', OPENAI_API_KEY: 'do-not-forward', CODEX_THREAD_ID: 'parent-thread', RELAYDESK_ENABLE_CODEX: '1', NODE_OPTIONS: 'do-not-forward' },
     ...extra,
     spawnProcess(executable, args, options) {
@@ -86,13 +87,88 @@ test('Codex invocation uses fixed read-only args, stdin transcript, isolated cwd
   assert.equal(f.calls[0].options.cwd, join(f.directory, 'workspace'));
   assert.equal(f.calls[0].args.at(-1), '-');
   assert.ok(!f.calls[0].args.some(arg => arg.includes('你好')));
-  assert.deepEqual(f.calls[0].args, codexArguments(join(f.directory, 'workspace'), 'allowed-model'));
+  assert.deepEqual(f.calls[0].args, codexArguments(join(f.directory, 'workspace'), 'allowed-model', '0.142.2'));
+  assert.ok(!f.calls[0].args.includes('agents.enabled=false'));
   for (const required of ['--strict-config', '--ignore-user-config', '--ephemeral', 'read-only', 'never', 'web_search="disabled"', 'history.persistence="none"', 'notify=[]', 'forced_login_method="chatgpt"', 'shell_environment_policy.inherit="none"', 'remote_plugin', 'multi_agent', 'multi_agent_v2']) assert.ok(f.calls[0].args.includes(required), required);
   for (const forbidden of ['--ignore-rules', '--yolo', '--dangerously-bypass-approvals-and-sandbox', 'resume', '--full-auto']) assert.ok(!f.calls[0].args.includes(forbidden));
   assert.deepEqual(f.calls[0].options.env, { HOME: '/local-home', PATH: '/local-bin', CODEX_HOME: '/existing-codex-home' });
   assert.equal(f.children[0].input, codexTranscript(input.history));
   assert.equal(f.children[0].input.match(/你好/g)?.length, 1);
   assert.equal((await stat(join(f.directory, 'workspace'))).mode & 0o777, 0o700);
+});
+
+test('startup probes the exact configured executable once with bounded output, no stdin and the same restricted environment', async t => {
+  let probes = 0;
+  const f = await adapterFixture(t, child => {
+    child.event({ type: 'item.completed', item: { id: 'reply', type: 'agent_message', text: 'ok' } });
+    child.event({ type: 'turn.completed' });
+    child.close();
+  }, {
+    versionProbe(executable, args, options) {
+      probes++;
+      assert.equal(executable, process.execPath);
+      assert.deepEqual(args, ['--version']);
+      assert.equal(options.shell, false);
+      assert.equal(options.encoding, 'utf8');
+      assert.equal(options.timeout, 5000);
+      assert.equal(options.maxBuffer, 4096);
+      assert.equal(options.killSignal, 'SIGKILL');
+      assert.deepEqual(options.stdio, ['ignore', 'pipe', 'pipe']);
+      assert.ok(String(options.cwd).endsWith('/workspace'));
+      assert.deepEqual(options.env, { HOME: '/local-home', PATH: '/local-bin', CODEX_HOME: '/existing-codex-home' });
+      return { status: 0, stdout: 'codex-cli 0.162.1\n', stderr: 'SECRET nonfatal PATH alias warning' };
+    },
+  });
+  await f.adapter.execute(context());
+  await f.adapter.execute(context());
+  assert.equal(probes, 1);
+  assert.equal(f.calls.length, 2);
+  const latest = f.calls[0].args;
+  assert.deepEqual(latest, codexArguments(join(f.directory, 'workspace'), undefined, '0.162.1'));
+  const agentsSetting = latest.indexOf('agents.enabled=false');
+  assert.ok(agentsSetting > 0);
+  assert.equal(latest[agentsSetting - 1], '-c');
+  // The verified new-version profile only adds a restriction; every old restriction remains.
+  const withoutNewRestriction = latest.toSpliced(agentsSetting - 1, 2);
+  assert.deepEqual(withoutNewRestriction, codexArguments(join(f.directory, 'workspace'), undefined, '0.142.2'));
+});
+
+test('unknown versions, malformed version output and failed probes reject startup without leaking diagnostics', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'relaydesk-version-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const results = [
+    { status: 0, stdout: 'codex-cli 0.163.0\n' },
+    { status: 0, stdout: 'codex-cli 0.162.1-alpha.1\n' },
+    { status: 0, stdout: 'codex-cli 0.162.1\nSECRET extra output' },
+    { status: 0, stdout: '' },
+    { status: 1, stdout: 'codex-cli 0.162.1\n', stderr: 'SECRET failure' },
+    { status: null, stdout: '', error: new Error('SECRET timeout or output limit') },
+    { status: null, stdout: 'codex-cli 0.162.1\n', signal: 'SIGKILL' as const },
+  ];
+  let executionSpawns = 0;
+  for (const result of results) {
+    assert.throws(() => createCodexAdapter({
+      executablePath: process.execPath, workspace: directory,
+      versionProbe: () => result,
+      spawnProcess: () => { executionSpawns++; throw new Error('must not execute'); },
+    }), error => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Codex CLI 版本/);
+      assert.doesNotMatch(error.message, /SECRET|0\.163\.0|alpha/);
+      return true;
+    });
+  }
+  assert.throws(() => createCodexAdapter({
+    executablePath: process.execPath, workspace: directory,
+    versionProbe: () => { throw new Error('SECRET launch failure'); },
+  }), error => error instanceof Error && /无法验证/.test(error.message) && !error.message.includes('SECRET'));
+  assert.equal(executionSpawns, 0);
+});
+
+test('production version probing rejects a real local non-Codex executable without contacting a provider', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'relaydesk-native-version-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  assert.throws(() => createCodexAdapter({ executablePath: process.execPath, workspace: directory, env: {} }), /版本尚未验证/);
 });
 
 test('only known completed assistant items are emitted; UTF-8/JSONL fragments and duplicates are handled', async t => {
@@ -318,6 +394,7 @@ test('real local Node subprocesses are killed and reaped on cancellation and tim
     const controller = new AbortController();
     const adapter = createCodexAdapter({
       executablePath: process.execPath, workspace: directory,
+      versionProbe: () => ({ status: 0, stdout: 'codex-cli 0.142.2\n' }),
       timeoutMs: action === 'timeout' ? 250 : 2000, killGraceMs: 25, stopConfirmationMs: 1000,
       spawnProcess(_executable, _args, options) {
         child = spawn(process.execPath, ['-e', `process.on('SIGTERM', () => {}); process.stdout.write(JSON.stringify({type:'item.completed',item:{id:'ready',type:'agent_message',text:'ready'}})+'\\n'); setInterval(() => {},1000);`], { ...options, stdio: 'pipe' });
@@ -383,7 +460,9 @@ test('startup requires explicit opt-in and absolute executable; model and enviro
   for (const model of ['', '--yolo', 'model --yolo', 'model\n--yolo', '$(echo injected)', 'x'.repeat(101)]) {
     assert.throws(() => createCodexAdapter({ executablePath: process.execPath, workspace: directory, model }), /model identifier/);
   }
-  const enabled = createCodexAdapterFromEnvironment({ RELAYDESK_ENABLE_CODEX: '1', RELAYDESK_CODEX_PATH: process.execPath, RELAYDESK_CODEX_MODEL: 'local-model' }, directory);
+  const enabled = createCodexAdapterFromEnvironment({ RELAYDESK_ENABLE_CODEX: '1', RELAYDESK_CODEX_PATH: process.execPath, RELAYDESK_CODEX_MODEL: 'local-model' }, directory, {
+    versionProbe: () => ({ status: 0, stdout: 'codex-cli 0.162.1\n' }),
+  });
   assert.equal(enabled?.info.id, 'codex');
   assert.equal(enabled?.info.available, true);
   assert.deepEqual(codexEnvironment({ HOME: '/h', CODEX_THREAD_ID: 'parent', OPENAI_API_KEY: 'key', ANTHROPIC_API_KEY: 'key', NODE_OPTIONS: '--require evil', AWS_SECRET_ACCESS_KEY: 'key', CODEX_HOME: '/existing' }), { HOME: '/h', CODEX_HOME: '/existing' });

@@ -1,10 +1,12 @@
 # 真实执行适配器：调用边界
 
-核验日期：2026-10-12。核验本机官方 CLI `0.142.2` 的帮助、生成的协议 schema 及厂商文档。文档研究不读取认证文件、不登录或安装软件；另行进行的受限模型连通探测及结果见 [验证记录](verification.md)。
+核验日期：2026-10-12。核验官方 CLI `0.142.2` 的帮助、生成的协议 schema，以及 `0.162.1` 的官方源码与配置 schema。经明确批准，已在项目内安装 `0.162.1` 并使用现有正常登录验证受限文本链路；没有读取、复制认证文件或新建登录。实测结果见 [验证记录](verification.md)。
 
 ## 当前结论
 
-首个 Codex 适配器可尝试**受限只读调用**，不能据此宣传为“没有任何工具”“无法读取其他目录”或“会员兼容已验证”。`read-only` 限制写入；固定 `cwd` 限制工作起点，两者都不等于文件读取隔离。零工具模式仍缺少已验证的统一约束。
+首个 Codex 适配器已通过 `0.162.1`、现有 ChatGPT 登录和 `gpt-6-astra` 的**受限只读文本调用**，得到助手回复、`turn.completed` 与退出码 0。不能据此宣传为“没有任何工具”“无法读取其他目录”或“所有会员兼容已验证”。`read-only` 限制写入；固定 `cwd` 限制工作起点，两者都不等于文件读取隔离。零工具模式仍缺少已验证的统一约束。
+
+启动构造适配器时，先使用同一环境白名单、固定目录和 `shell:false` 有界执行 `--version`（5 秒、4 KiB）。只接受已核验的 `0.142.2` 与 `0.162.1`；未知版本、异常或超时拒绝启用，原始 stderr 不回传。新版必须追加 `agents.enabled=false` 并同时禁用 `multi_agent_v2`；旧版 strict config 不支持该字段，使用单独参数分支。版本检查通过仍不代表账户模型可用。来源：[0.162.1 协作功能配置逻辑](https://github.com/openai/codex/blob/rust-v0.162.1/codex-rs/core/src/config/mod.rs#L1604-L1630)。
 
 模型输入只由本会话的结构化文本历史构成。服务端使用固定二进制路径、固定空工作目录、参数数组和 stdin；浏览器不能指定程序、目录、环境变量、模型配置或附加参数。不要使用 shell 拼接、现有会话恢复、`--last`、凭据复制或认证文件解析。
 
@@ -12,7 +14,7 @@
 
 本机 `exec --help` 确认：`--ignore-user-config` 不载入用户 `config.toml`，认证仍使用原 `CODEX_HOME`；`--ephemeral` 不保存会话文件；支持 JSONL、stdin 和只读沙箱。`--strict-config` 可拒绝该版本不认识的配置，但不能证明已接受的旧开关仍有效。保留现有 execpolicy 规则，不传 `--ignore-rules`。来源：[官方命令参考](https://learn.chatgpt.com/docs/developer-commands?surface=cli)。
 
-下面是供受控冒烟测试评审的调用基线，**尚不是经实测证明的零工具沙箱**。`CODEX_BIN` 应由本机操作者指定为已核验的官方二进制；`RELAYDESK_EXEC_DIR` 是项目创建的空目录。两者均不接受 HTTP 请求中的值。调用前逐项检查安装版本支持的 feature，遇到未知或被移除项应停止。
+下面是 `0.162.1` 的受控调用基线，**不是经实测证明的零工具沙箱**。`CODEX_BIN` 应由本机操作者指定为已核验的官方二进制；`RELAYDESK_EXEC_DIR` 是项目创建的空目录。两者均不接受 HTTP 请求中的值。`0.142.2` 不接受下面的 `agents.enabled` 字段，实际适配器按探测版本选择参数，不能跨版本照搬。
 
 ```sh
 "$CODEX_BIN" exec \
@@ -27,6 +29,7 @@
   --disable tool_suggest --disable workspace_dependencies \
   -c 'approval_policy="never"' \
   -c 'forced_login_method="chatgpt"' \
+  -c 'agents.enabled=false' \
   -c 'project_doc_max_bytes=0' \
   -c 'web_search="disabled"' \
   -c 'history.persistence="none"' \
@@ -50,11 +53,11 @@ CLI 进程环境采用明确白名单，排除 API key、provider endpoint 覆�
 
 ## App Server 的后续路线
 
-本机通过 `app-server generate-json-schema --experimental --out <临时目录>` 生成的 `v2/ThreadStartParams.json` 和 `v2/TurnStartParams.json` 均包含 `environments`：空数组明确关闭环境访问。它是线程/轮次协议字段；没有证据表明 `exec -c 'environments=[]'` 有效。后续若使用它，应在每轮保持空环境，不允许前端覆盖。
+此前通过 `0.142.2 app-server generate-json-schema --experimental --out <临时目录>` 生成的 `v2/ThreadStartParams.json` 和 `v2/TurnStartParams.json` 均包含 `environments`：空数组明确关闭环境访问。它是线程/轮次协议字段；没有证据表明 `exec -c 'environments=[]'` 有效。后续接入新版 app-server 前仍须重新核验对应版本的 schema；若使用该字段，应在每轮保持空环境，不允许前端覆盖。
 
 同一 schema 中没有全局 `tools`、`toolConfig`、`toolChoice` 或 `allowedTools` 参数；`dynamicTools` 表示客户端提供的自定义工具，空数组不会证明其他内置工具或 MCP 已关闭。`ConfigReadResponse` 的 `ToolsV2` 也没有总工具白名单。来源：本机 CLI 生成 schema；协议定位参见 [App Server](https://learn.chatgpt.com/docs/app-server)。
 
-本机 `app-server --help` 没有 `--ignore-user-config`。因此即使使用空环境，也需在初始化前审查并禁用继承的 hooks、MCP、apps、插件和通知命令。未来通过 stdio 使用短生命周期进程、`ephemeral: true`、空环境及受限 RPC 白名单；不要直接向浏览器开放完整协议。未收到真实事件证明前不显示“已连接”。
+此前 `0.142.2 app-server --help` 没有 `--ignore-user-config`，不能将 exec 的隔离参数直接移植。即使使用空环境，也需在初始化前审查继承的 hooks、MCP、apps、插件和通知命令，并核对新版可用控制。计划通过 stdio 使用受限 RPC；不要直接向浏览器开放完整协议。原生会话恢复所需的持久化与纯文本 ephemeral 模式不同，应单独验证，未收到真实事件证明前不显示“已连接”。
 
 ## 执行器应有的失败边界
 
