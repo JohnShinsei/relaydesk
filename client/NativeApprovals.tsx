@@ -100,7 +100,7 @@ export default function NativeApprovals({ session, task, connected, onSession, a
   }
   async function recover() {
     const startedWith = currentSession.current;
-    if (!currentConnected.current || recoveringNow.current || currentTask.current.status !== 'unknown' || !startedWith.engineBinding) return;
+    if (!currentConnected.current || recoveringNow.current || currentTask.current.status !== 'unknown' || (!startedWith.engineBinding && !(startedWith.adapterId === 'hermes' && currentTask.current.nativeTurnId))) return;
     recoveringNow.current = true; setRecovering(true); setError('');
     try {
       const result = await requestSession(`/api/sessions/${encodeURIComponent(startedWith.id)}/recover`, {});
@@ -109,8 +109,8 @@ export default function NativeApprovals({ session, task, connected, onSession, a
     finally { recoveringNow.current = false; if (alive.current) setRecovering(false); }
   }
 
-  return <section className="native-approvals" aria-label="AppServer 原生审批与恢复">
-    {(task.status === 'unknown' || task.stopUnconfirmed) && <div className="native-state-warning" role="status"><TriangleAlert size={19} /><div><strong>{task.stopUnconfirmed ? '停止状态未确认' : '原生任务结果未知'}</strong><p>尚未确认此轮执行已经结束。当前会话不能提交新任务，审批入口也已暂停；不能把断线视为操作已取消。</p>{task.status === 'unknown' && session.engineBinding && <><button className="secondary-button" data-testid="native-recover" onClick={() => void recover()} disabled={recovering || !connected}>{recovering ? <LoaderCircle size={15} className="spin" /> : <RefreshCw size={15} />}读取原生历史并恢复状态</button><small>只核对已有原生会话，不会重新发送提示词，也不会重放审批。</small></>}</div></div>}
+  return <section className="native-approvals" aria-label={session.adapterId === 'hermes' ? 'Hermes 操作审批与恢复' : 'AppServer 原生审批与恢复'}>
+    {(task.status === 'unknown' || task.stopUnconfirmed) && <div className="native-state-warning" role="status"><TriangleAlert size={19} /><div><strong>{task.stopUnconfirmed ? '停止状态未确认' : '原生任务结果未知'}</strong><p>尚未确认此轮执行已经结束。当前会话不能提交新任务，审批入口也已暂停；不能把断线视为操作已取消。</p>{task.status === 'unknown' && (session.engineBinding || (session.adapterId === 'hermes' && task.nativeTurnId)) && <><button className="secondary-button" data-testid="native-recover" onClick={() => void recover()} disabled={recovering || !connected}>{recovering ? <LoaderCircle size={15} className="spin" /> : <RefreshCw size={15} />}读取原生历史并恢复状态</button><small>只核对已有原生会话，不会重新发送提示词，也不会重放审批。</small></>}</div></div>}
     {error && <div className="error-banner native-error" role="alert"><TriangleAlert size={16} /><span>{error}</span></div>}
     {(task.nativeApprovals ?? []).map((approval) => {
       const pending = approval.status === 'pending';
@@ -119,7 +119,7 @@ export default function NativeApprovals({ session, task, connected, onSession, a
       const localAttempt = attempts[`${session.id}/${approval.id}`];
       const actionable = pending && !expired && !localAttempt && connected && !decisionsBlocked && !task.stopUnconfirmed && ['queued', 'running', 'awaiting_approval'].includes(task.status);
       return <article className={`native-approval-card native-approval-${approval.status}`} data-testid="native-approval-card" data-approval-id={approval.id} key={approval.id}>
-        <header><span className="native-approval-icon">{approval.kind === 'command' ? <TerminalSquare size={21} /> : <FileDiff size={21} />}</span><div><span className="native-eyebrow">APPSERVER · 原生操作审批</span><h3>{approval.kind === 'command' ? '核对这一次执行操作' : '核对这一次文件变更'}</h3></div><span className="badge native-badge">真实操作</span></header>
+        <header><span className="native-approval-icon">{approval.kind === 'command' ? <TerminalSquare size={21} /> : <FileDiff size={21} />}</span><div><span className="native-eyebrow">{session.adapterId === 'hermes' ? 'HERMES · 单次操作审批' : 'APPSERVER · 原生操作审批'}</span><h3>{approval.kind === 'tool' ? '核对这一次工具操作' : approval.kind === 'command' ? '核对这一次执行操作' : '核对这一次文件变更'}</h3></div><span className="badge native-badge">真实操作</span></header>
         <div className="native-operation"><span className="section-label">固定操作内容</span><pre>{approval.operation}</pre></div>
         <dl className="native-approval-meta"><div><dt>工作目录</dt><dd>{approval.cwd ?? '原生请求未提供'}</dd></div><div><dt>原生请求 ID · {typeof approval.requestId}</dt><dd>{JSON.stringify(approval.requestId)}</dd></div><div><dt>收到时间</dt><dd>{dateTime(approval.createdAt)}</dd></div><div><dt>有效期至</dt><dd>{dateTime(approval.expiresAt)}</dd></div></dl>
         {!!approval.changes?.length && <div className="native-changes"><span className="section-label">待确认的文件变更 <span>{approval.changes.length} 个文件</span></span>{approval.changes.map((change, index) => <div className="native-change" key={`${change.path}-${index}`}><h4>{change.path}</h4><pre>{change.diff}</pre></div>)}</div>}

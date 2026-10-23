@@ -286,7 +286,7 @@ test('file approvals require unchanged complete diffs; missing previews, extra p
     child.notify('item/started', { threadId: 'native-thread', turnId: 'native-turn', item: { id: 'file', type: 'fileChange', changes: [{ path: join(workspace, 'escape', 'x'), diff: '+unsafe' }] } });
     child.request('escape', 'item/fileChange/requestApproval', { ...approvalParams(workspace), itemId: 'file' });
   } }, { environmentAccess: true });
-  workspace = escaped.workspace; await symlink(tmpdir(), join(workspace, 'escape'));
+  workspace = escaped.workspace; await symlink(tmpdir(), join(workspace, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
   const e = context(); const running = escaped.driver.execute(e.input); await until(() => e.approvals.length === 1);
   assert.ok(!e.approvals[0].allowedDecisions.includes('accept'));
   escaped.children[0].terminal(); await running;

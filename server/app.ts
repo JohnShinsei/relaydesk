@@ -24,7 +24,7 @@ const bootstrap: Bootstrap = {
     { id: 'slack', name: 'Slack', status: 'planned', description: '未来通过官方 API 按授权接收消息，回复需明确批准。' },
     { id: 'email', name: 'Email', status: 'planned', description: '未来按邮箱提供商的官方授权方式接收；尚未读取或发送邮件。' },
   ],
-  runtime: { mode: 'local', agent: 'Mac 本地模拟执行器', gateway: 'local', version: '0.3.0' },
+  runtime: { mode: 'local', agent: '本机执行服务 · 模拟模式', gateway: 'local', version: '0.3.0' },
 };
 
 function json(response: ServerResponse, status: number, body: unknown) {
@@ -91,10 +91,11 @@ function feedQuery(query: URLSearchParams, events = false): FeedQuery {
 }
 
 /** Codex is an optional internal startup dependency, never an HTTP-provided executable. */
-export function createApp({ dbPath, delayMs = 65, staticDir = resolve('dist'), codex, nativeDriver, acknowledgeInterruptedCodex = false }: { dbPath: string; delayMs?: number; staticDir?: string; codex?: ExecutionAdapter; nativeDriver?: EngineDriver; acknowledgeInterruptedCodex?: boolean }) {
-  const engine = new TaskEngine(dbPath, delayMs, codex, { acknowledgeInterruptedCodex, nativeDriver });
+export function createApp({ dbPath, delayMs = 65, staticDir = resolve('dist'), codex, nativeDriver, drivers = [], acknowledgeInterruptedCodex = false }: { dbPath: string; delayMs?: number; staticDir?: string; codex?: ExecutionAdapter; nativeDriver?: EngineDriver; drivers?: EngineDriver[]; acknowledgeInterruptedCodex?: boolean }) {
+  const engine = new TaskEngine(dbPath, delayMs, codex, { acknowledgeInterruptedCodex, nativeDriver, drivers });
   const inbox = new InboxService(dbPath, { delayMs });
-  const runtimeBootstrap: Bootstrap = { ...bootstrap, adapters: engine.catalog(), runtime: { ...bootstrap.runtime, agent: nativeDriver ? 'Mac 本地执行器 · Codex App Server 已配置' : codex ? 'Mac 本地执行器 · Codex exec 旧模式已配置' : bootstrap.runtime.agent } };
+  const names = [...drivers.map(driver => driver.info.name), ...(nativeDriver ? [nativeDriver.info.name] : []), ...(codex ? [codex.info.name] : [])];
+  const runtimeBootstrap: Bootstrap = { ...bootstrap, adapters: engine.catalog(), runtime: { ...bootstrap.runtime, agent: names.length ? `本机执行服务 · ${names.join(' / ')} 已配置` : bootstrap.runtime.agent } };
   const listeners = new Map<string, Set<ServerResponse>>();
   const feedListeners = new Map<ServerResponse, FeedQuery>();
   let feedFlush: ReturnType<typeof setTimeout> | undefined;

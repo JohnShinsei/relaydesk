@@ -2,6 +2,7 @@ import type { AdapterInfo, EngineDriver, ExecutionAdapter, ExecutionContext } fr
 
 /** Default catalog; a real Codex entry becomes available only through local startup opt-in. */
 export const adapterCatalog: AdapterInfo[] = [
+  { id: 'hermes', name: 'Hermes Agent', description: '通过本机 Hermes 执行任务；进度、审批、停止与恢复以执行器回执为准。', available: false, kind: 'http', reason: '尚未启用；由本机操作者配置 Hermes API 并完成连接验证。' },
   { id: 'mock-codex', name: 'Codex · 模拟', description: '本地确定性模拟，验证流式聊天与任务流程；不调用 Codex。', available: true, kind: 'mock' },
   { id: 'mock-claude', name: 'Claude · 模拟', description: '本地确定性模拟，验证第二种执行适配器；不调用 Claude。', available: true, kind: 'mock' },
   { id: 'codex', name: 'Codex exec · 旧模式', description: '旧版 exec 文本适配器：受限只读对话，不支持原生审批或线程恢复。', available: false, kind: 'cli', reason: '本地未启用 Codex；需要显式配置官方 CLI 路径并使用已有登录。' },
@@ -9,7 +10,7 @@ export const adapterCatalog: AdapterInfo[] = [
   { id: 'claude', name: 'Claude Code', description: '计划接入官方 CLI / Agent SDK。', available: false, kind: 'cli', reason: '尚未实现官方执行适配器；此版本不使用登录状态或会员额度。' },
 ];
 
-export function createAdapterRegistry(delayMs: number, codex?: ExecutionAdapter, nativeDriver?: EngineDriver) {
+export function createAdapterRegistry(delayMs: number, codex?: ExecutionAdapter, nativeDriver?: EngineDriver, drivers: EngineDriver[] = []) {
   const adapters = createMockAdapters(delayMs);
   if (codex) {
     if (codex.info.id !== 'codex' || codex.info.kind !== 'cli' || !codex.info.available) throw new Error('Invalid internal Codex adapter.');
@@ -18,6 +19,13 @@ export function createAdapterRegistry(delayMs: number, codex?: ExecutionAdapter,
   if (nativeDriver) {
     if (nativeDriver.info.id !== 'codex-app-server' || nativeDriver.info.kind !== 'cli' || !nativeDriver.info.available) throw new Error('Invalid internal App Server driver.');
     adapters.set('codex-app-server', nativeDriver);
+  }
+  for (const driver of drivers) {
+    const expectedKind = driver.info.id === 'hermes' ? 'http' : driver.info.id === 'codex-app-server' ? 'cli' : undefined;
+    if (!expectedKind || driver.info.kind !== expectedKind || !driver.info.available || adapters.has(driver.info.id)) {
+      throw new Error('Invalid or duplicate internal execution driver.');
+    }
+    adapters.set(driver.info.id, driver);
   }
   const catalog = adapterCatalog.map(info => structuredClone(adapters.get(info.id)?.info ?? info));
   return { adapters, catalog };

@@ -94,7 +94,8 @@ test('Codex invocation uses fixed read-only args, stdin transcript, isolated cwd
   assert.deepEqual(f.calls[0].options.env, { HOME: '/local-home', PATH: '/local-bin', CODEX_HOME: '/existing-codex-home' });
   assert.equal(f.children[0].input, codexTranscript(input.history));
   assert.equal(f.children[0].input.match(/你好/g)?.length, 1);
-  assert.equal((await stat(join(f.directory, 'workspace'))).mode & 0o777, 0o700);
+  // Windows ACLs are not POSIX mode bits; keep the private-mode assertion on POSIX.
+  if (process.platform !== 'win32') assert.equal((await stat(join(f.directory, 'workspace'))).mode & 0o777, 0o700);
 });
 
 test('startup probes the exact configured executable once with bounded output, no stdin and the same restricted environment', async t => {
@@ -114,7 +115,7 @@ test('startup probes the exact configured executable once with bounded output, n
       assert.equal(options.maxBuffer, 4096);
       assert.equal(options.killSignal, 'SIGKILL');
       assert.deepEqual(options.stdio, ['ignore', 'pipe', 'pipe']);
-      assert.ok(String(options.cwd).endsWith('/workspace'));
+      assert.ok(String(options.cwd).endsWith(`${process.platform === 'win32' ? '\\' : '/'}workspace`));
       assert.deepEqual(options.env, { HOME: '/local-home', PATH: '/local-bin', CODEX_HOME: '/existing-codex-home' });
       return { status: 0, stdout: 'codex-cli 0.162.1\n', stderr: 'SECRET nonfatal PATH alias warning' };
     },

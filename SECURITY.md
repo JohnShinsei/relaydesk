@@ -1,23 +1,37 @@
-# Local development security
+# 安全边界
 
-RelayDesk v0.3 is a single-user local prototype. It binds to `127.0.0.1`, validates HTTP Host and Origin, and provides no public authentication or remote deployment configuration. Do not expose its port through a tunnel or reverse proxy before adding device/user authentication and reviewed authorization.
+RelayDesk 是单用户本地原型，固定监听 `127.0.0.1` 并校验 Host/Origin，尚无远程用户认证、设备撤销和公网部署配置。**不要把端口直接暴露到公网、隧道或反向代理。** 默认真实执行器禁用，模拟聊天与收件箱均使用合成数据。
 
-Default execution adapters and the work inbox are simulations. The inbox only loads synthetic fixtures and records mock delivery outcomes; it has no WeChat, dot, or other external messaging connection. Optional Codex adapters launch a configured official CLI directly (no shell), with fixed arguments and a fixed project working directory. The legacy exec adapter sends conversation text through stdin. The native App Server driver uses private stdio RPC and persistent official threads, sending only each new prompt. Both use the CLI's normal ChatGPT login without copying credential files or exposing a token broker. HTTP cannot supply executable paths, models, environments, directories, extra arguments or arbitrary RPC methods. Other providers and real message connectors remain unimplemented.
+## Hermes
 
-Incoming channel messages are untrusted data, never execution instructions or reply authorization. Preparing a reply binds an immutable account, native thread identifier, source message, and exact content without sending it. A separate explicit send intent is required; demo high-impact or sensitive cases also require review confirmation. Those demonstration rules are not a complete sensitive-data classifier. Idempotency keys and duplicate payload detection prevent repeated delivery; a pending or unknown result blocks another send for that source message even with a new key. A restart converts unconfirmed sending states to unknown. This prototype provides no automatic retry or unknown-result override. Real integration requires native identity and delivery evidence, not contact-name matching or a screenshot of a chat list.
+Hermes 驱动仅在日本端操作者显式启用并配置独立 API key 后可用，只接受 loopback HTTP origin，拒绝跳转。URL、密钥、模型、目录和任意控制方法不能通过浏览器请求覆盖。API key 对应 Hermes 自身的 `API_SERVER_KEY`，不是 ChatGPT 或 Codex CLI 凭据；不读取、复制或将 OAuth 登录信息转成通用 API key。
 
-The Codex adapters disable shell, plugins, browser and related capabilities and request a read-only sandbox. These controls are not a complete file-read isolation boundary. They are restricted to a trusted local operator; do not forward untrusted channel content or expose this API remotely. Terminal authentication/compatibility errors fail closed without API-key fallback, automatic login, update, or application-level resubmission. Output limits, timeouts and process-exit confirmation constrain subprocesses. Raw provider diagnostics are not returned to the browser.
+Loopback 与能力探测不是执行沙箱。Hermes API 使用其配置的工具权限，可能执行终端、文件或桌面动作。RelayDesk 不替 Hermes 提供通用权限隔离，不能因为存在审批接口就假定所有副作用都被审批拦截。真实模型、工具及审批策略本轮未验收；先按 [接入清单](docs/hermes-integration.md)验证指定无害任务。
 
-App Server uses `on-request` with the human reviewer, not the legacy exec `never` policy. Environment access is disabled by default; a local operator may opt into the fixed test workspace while keeping the sandbox and approval policy. An accepted native approval can authorize a write. Single-use approval IDs bind immutable previews to the native thread, turn, item and typed request ID; incomplete previews, path escapes, renames and additional permission requests cannot be accepted. Declining an action does not itself end the model turn. Intent is persisted before writing the decision; uncertain sends are never replayed.
+审批限定当前任务、具体请求、执行代次和单次动作。缺少可检查预览或遇到未支持控制时不放行，不做永久批准和批量授权。当前文件编辑审批缺少完整差异预览，保持 unknown 并拒绝接受；仅支持可预览的普通工具审批。决定先保存再发送，未知结果不自动重发。停止请求成功不代表执行已退出，收到真实终态前保持 cancelling 或 unknown；停止不能撤销已发生的操作。
 
-Unlike exec, App Server reads the user's normal configuration. The driver pins provider/endpoints and disables hooks, notify, plugins, remote control and other capabilities for that process. It inspects effective configuration only in memory before creating a thread. Existing MCP entries are discovered without starting a thread, then disabled individually in a replacement process and verified again. Unsupported names or configuration deviations stop execution. No global configuration is edited and no raw configuration is logged. These checks are not a universal isolation guarantee against unknown managed policy or concurrent external configuration changes. See [native driver details](docs/native-driver.md).
+跨会话仅一个真实任务，未知结果阻塞新任务。恢复只查询保存的原 run，不猜“最近一条”、不换 key 继续执行、不自动解除 Hermes unknown。创建响应丢失而没有 run ID 时保持阻塞，人工恢复流程仍待实现。不要删除数据库或修改状态来绕过未知执行。
 
-Adapter startup probes the configured executable's version with the same environment allowlist and bounded time/output. Legacy exec accepts reviewed versions 0.142.2 and 0.162.1; the native driver accepts only 0.162.1, including its version-specific restrictive remote-control setting. Unknown or failed version probes stop startup without publishing raw diagnostics. Version acceptance is not proof of model access or complete isolation.
+Hermes 幂等记录有有限保留期和凭据作用域，不能宣称永久或跨配置 exactly-once。更换 API key / profile 前先核对所有未完成任务；当前不会把凭据变更视为已停止旧工作。其他本机 Hermes 入口与人工桌面操作不受 RelayDesk 单任务锁约束。
 
-A detached CLI may survive an abrupt server crash. Legacy exec interruption quarantines real execution across restarts; only after manually checking the old process may the operator use `RELAYDESK_CODEX_ACK_INTERRUPTED=1` for one startup. Native interrupted tasks instead become `unknown`, invalidate pending approvals and block further prompts in that session. Recovery reads the exact persisted official turn and never resends input. The legacy acknowledgement does not clear native uncertainty. `turn/interrupt` acknowledgement alone does not establish cancellation; an authoritative terminal event or exact historical terminal is required. No stored PID is used to kill an old process. Persistent storage failures stop active execution and reject further writes until repaired; an in-memory status is not proof it was saved.
+## 保留的 Codex 驱动
 
-Conversation data is stored unencrypted in `.data/` on the local machine. Protect it using your operating system's permissions and disk encryption. Do not upload that folder, `.env`, logs, or real message samples. This repository only includes synthetic test inputs and a secret-free `.env.example`.
+Codex 使用操作者指定的官方 CLI、固定参数和工作目录，直接启动子进程而非 shell；浏览器无通用 RPC 代理。旧 exec 用 stdin 文本历史，原生 App Server 使用私有 stdio 与持久线程。使用官方正常登录，不复制认证文件或提供 token broker。
 
-Remote integration needs explicit identity, scoped device pairing, transport encryption, replay protection, rate and storage limits, audit retention, and exact-action approvals. A local demo approval must not be reused as approval for future external actions.
+原有驱动的版本限制、只读 sandbox、单次审批、进程退出确认、配置约束与 MCP 禁用逻辑保持。它们不是完整文件读取隔离。原生批准可以授权实际写入，必须检查具体预览。旧 exec 中断后的本机 ACK 仅用于人工确认旧进程停止后的一次启动，不能解除原生 Codex 或 Hermes 未知结果。详情见 [Codex 驱动](docs/native-driver.md)。
 
-To report a vulnerability, use the repository's private vulnerability reporting feature if enabled. Do not put secrets or private conversation data into public issues.
+服务崩溃后子进程可能仍存活；不通过保存的旧 PID 自动杀进程。持久化失败应停止继续写入，修复存储并重启。内存状态不是已保存的证明。
+
+## 数据与消息
+
+会话和任务正文未加密保存在 `.data/`，使用操作系统权限和磁盘加密保护。不要上传 `.data`、`.env`、真实消息、日志或登录文件。仓库只包含合成测试输入与不含秘密的 `.env.example`。浏览器接收执行结果，但活动摘要不应包含隐藏推理、完整命令、文件差异、绝对路径、配置或原始提供方诊断。模型结果与工具输出仍需按敏感文件处理。
+
+微信工作收件箱只演示合成消息与模拟发送。收到外部内容不是任务指令、审批或发送授权。拟稿绑定不可变来源、目标与内容；模拟发送另需明确意图，未知发送阻止另一个草稿绕过。真实连接需要稳定原生 ID、正式支持的接入方式和提供方回执，不能用联系人名称或截图代替。
+
+## 远程阶段
+
+远程使用前需完成身份验证、加密、设备或凭据撤销、重放防护、限流、审计保留、备份恢复和精确动作审批。日本端连接程序先合在同一服务内；可选 Hub 仅转发，不保存模型凭据。未经这些步骤，不把本机原型描述为可安全远程控制电脑的成品。
+
+文件下载和截图回传仍待实现授权与范围限制。桌面任务需另测权限提升、锁屏、休眠和重启，不能从文本调用成功推断。详见 [路线图](docs/roadmap.md)。
+
+报告漏洞优先使用仓库私密漏洞报告（若已开启）；不要把秘密或私人会话写入公开 issue。

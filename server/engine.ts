@@ -3,17 +3,18 @@ import type { AdapterId, EngineDriver, ExecutionAdapter, Message, NativeApproval
 import { createAdapterRegistry, pause } from './adapters.ts';
 import { SessionStore } from './store.ts';
 import { CodexStopUnconfirmedError } from './codex-adapter.ts';
-import { NativeOutcomeUnknownError } from './codex-app-server.ts';
+import { bindingMatchesDriver, isDriverAdapterId, NativeOutcomeUnknownError } from './execution.ts';
 import { FeedInputError, makeTaskActivity, makeTaskFeed, recordActivity } from './task-feed.ts';
 import type { FeedQuery } from './task-feed.ts';
 
 const active = new Set<TaskStatus>(['queued', 'running', 'awaiting_approval', 'cancelling']);
 const now = () => new Date().toISOString();
-const interruptedReason = '存在未确认结束的真实 CLI 任务，真实适配器已暂停；请先检查本地进程，再由本机操作员确认。';
+const interruptedReason = '存在未确认结束的真实任务，真实适配器已暂停；请先检查本地进程，再由本机操作员确认。';
 const storageReason = '本地存储写入失败；本次状态未确认保存，已请求停止执行。请检查磁盘后重启服务。';
-const isReal = (task: Task) => task.adapterId === 'codex' || task.adapterId === 'claude' || task.adapterId === 'codex-app-server';
+const isReal = (task: Task) => task.adapterId === 'codex' || task.adapterId === 'claude' || isDriverAdapterId(task.adapterId);
 interface EngineOptions {
   nativeDriver?: EngineDriver;
+  drivers?: EngineDriver[];
   acknowledgeInterruptedCodex?: boolean;
   /** Internal fault-injection seam; never accepted over HTTP. */
   store?: Pick<SessionStore, 'all' | 'save' | 'close'>;
@@ -33,7 +34,7 @@ export class TaskEngine {
   private registry: ReturnType<typeof createAdapterRegistry>;
   private realPaused = false;
   private storageFailure?: HttpError;
-  private nativeDriver?: EngineDriver;
+  private drivers = new Map<AdapterId, EngineDriver>();
   private recovering = new Set<string>();
   private feedEpoch = randomUUID();
   private feedVersion = 0;
@@ -44,12 +45,15 @@ export class TaskEngine {
     this.delayMs = delayMs;
     this.store = options.store ?? new SessionStore(dbPath);
     this.sessions = new Map(this.store.all().map(session => [session.id, session]));
-    this.nativeDriver = options.nativeDriver;
-    this.registry = createAdapterRegistry(delayMs, codex, options.nativeDriver);
+    for (const driver of [...(options.nativeDriver ? [options.nativeDriver] : []), ...(options.drivers ?? [])]) {
+      if (this.drivers.has(driver.info.id)) throw new Error('Duplicate execution driver.');
+      this.drivers.set(driver.info.id, driver);
+    }
+    this.registry = createAdapterRegistry(delayMs, codex, options.nativeDriver, options.drivers ?? []);
     for (const session of this.sessions.values()) {
       let changed = false;
       for (const task of session.tasks) {
-        if (task.adapterId === 'codex-app-server') {
+        if (isDriverAdapterId(task.adapterId)) {
           if (active.has(task.status) || task.stopUnconfirmed) {
             task.error = '本地服务已重启，原生执行结果待核验；恢复只读取原生线程，不会重新发送消息。';
             task.stopUnconfirmed = true;
@@ -96,7 +100,7 @@ export class TaskEngine {
     if (status === 'running') task.startedAt ??= task.updatedAt;
     if (status === 'completed' || status === 'cancelled' || status === 'failed') task.endedAt = task.updatedAt;
     if (status === 'unknown') delete task.endedAt;
-    if (task.adapterId === 'codex-app-server') {
+    if (isDriverAdapterId(task.adapterId)) {
       recordActivity(task, status, task.updatedAt);
       if (task.events.length > 200) task.events.splice(0, task.events.length - 200);
     }
@@ -111,7 +115,7 @@ export class TaskEngine {
   }
 
   private publish(session: Session) {
-    if (session.adapterId === 'codex-app-server') {
+    if (isDriverAdapterId(session.adapterId)) {
       this.feedVersion++;
       try { this.onFeedChange(); } catch { /* The next fresh feed snapshot remains authoritative. */ }
     }
@@ -126,7 +130,7 @@ export class TaskEngine {
   private pauseRealAdapters() {
     this.realPaused = true;
     for (const info of this.registry.catalog) {
-      if (info.kind === 'cli') { info.available = false; info.reason = interruptedReason; }
+      if (info.kind !== 'mock') { info.available = false; info.reason = interruptedReason; }
     }
   }
 
@@ -182,7 +186,7 @@ export class TaskEngine {
 
   taskActivity(id: string, query: { before?: number; limit?: number } = {}) {
     const { task } = this.requireTask(id);
-    if (task.adapterId !== 'codex-app-server') throw new HttpError(404, '此任务没有原生任务活动记录。');
+    if (!isDriverAdapterId(task.adapterId)) throw new HttpError(404, '此任务没有原生任务活动记录。');
     try { return makeTaskActivity(task, query); }
     catch (error) { if (error instanceof FeedInputError) throw new HttpError(400, error.message); throw error; }
   }
@@ -217,14 +221,18 @@ export class TaskEngine {
     }
     const adapter = this.registry.adapters.get(session.adapterId);
     if (!adapter) throw new HttpError(409, '此会话的执行适配器当前未启用，请检查本地配置。');
-    if (adapter.info.kind === 'cli' && this.realPaused) throw new HttpError(409, interruptedReason);
+    if (adapter.info.kind !== 'mock' && this.realPaused) throw new HttpError(409, interruptedReason);
     if (this.recovering.has(session.id) || session.tasks.some(task => task.status === 'unknown' || task.stopUnconfirmed)) throw new HttpError(409, '此会话有结果未知的执行，请先核验原生线程；不会自动重发。');
-    if (mode === 'approval-demo' && adapter.info.kind !== 'mock') throw new HttpError(400, '真实 Codex 仅支持聊天，不支持模拟审批任务。');
+    if (session.engineBinding && !bindingMatchesDriver(session.engineBinding, session.adapterId)) throw new HttpError(409, '会话绑定与当前执行器不匹配。');
+    if (mode === 'approval-demo' && adapter.info.kind !== 'mock') throw new HttpError(400, '真实执行器仅支持聊天，不支持模拟审批任务。');
     if (session.tasks.some(task => active.has(task.status))) throw new HttpError(409, '当前会话已有进行中的任务，请完成或取消后再提交。');
+    if (adapter.info.kind !== 'mock' && ([...this.sessions.values()].some(row => row.tasks.some(task => isReal(task) && (active.has(task.status) || task.status === 'unknown' || task.stopUnconfirmed))) || this.recovering.size > 0)) {
+      throw new HttpError(409, '这台电脑已有进行中或结果未知的真实任务，请先完成、停止或核验原任务。');
+    }
     const timestamp = now();
     const task: Task = {
       id: randomUUID(), sessionId, adapterId: session.adapterId, prompt, mode, status: 'queued',
-      createdAt: timestamp, updatedAt: timestamp, events: [{ status: 'queued', at: timestamp, detail: adapter.info.kind === 'mock' ? '本地模拟任务已排队。' : 'Codex CLI 对话任务已排队。' }],
+      createdAt: timestamp, updatedAt: timestamp, events: [{ status: 'queued', at: timestamp, detail: adapter.info.kind === 'mock' ? '本地模拟任务已排队。' : '真实执行任务已排队。' }],
       ...(idempotencyKey ? { idempotencyKey } : {}),
     };
     recordActivity(task, 'queued', timestamp);
@@ -242,8 +250,8 @@ export class TaskEngine {
     const { session, task } = this.requireTask(id);
     if (!active.has(task.status)) throw new HttpError(409, '任务已经结束，无法再次取消。');
     if (task.status === 'cancelling') throw new HttpError(409, '正在等待执行进程停止。');
-    const waitForExit = (task.status === 'running' || (task.adapterId === 'codex-app-server' && task.status === 'awaiting_approval')) && this.registry.adapters.get(task.adapterId)?.info.kind === 'cli';
-    this.transition(task, waitForExit ? 'cancelling' : 'cancelled', waitForExit ? '正在停止 Codex 进程，等待确认退出。' : '用户已取消；停止后续执行与输出。');
+    const waitForExit = isReal(task) && (task.status === 'running' || task.status === 'awaiting_approval');
+    this.transition(task, waitForExit ? 'cancelling' : 'cancelled', waitForExit ? '已请求停止真实执行，等待执行器确认结束。' : '用户已取消；停止后续执行与输出。');
     this.controllers.get(id)?.abort();
     this.save(session);
     return structuredClone(task);
@@ -264,8 +272,9 @@ export class TaskEngine {
   async decideNativeApproval(id: string, approvalId: string, decision: NativeApprovalDecision): Promise<Session> {
     this.requireWritable();
     const { session, task } = this.requireTask(id);
-    const driver = this.nativeDriver;
-    if (!driver || task.adapterId !== 'codex-app-server') throw new HttpError(400, '此任务没有原生审批接口。');
+    const driver = this.drivers.get(session.adapterId);
+    if (!driver || task.adapterId !== session.adapterId) throw new HttpError(400, '此任务没有原生审批接口。');
+    if (!session.engineBinding || !bindingMatchesDriver(session.engineBinding, driver.info.id)) throw new HttpError(409, '会话绑定与当前执行器不匹配。');
     const approval = task.nativeApprovals?.find(item => item.id === approvalId);
     if (!approval || approval.status !== 'pending' || task.status !== 'awaiting_approval' || task.stopUnconfirmed) throw new HttpError(409, '审批已失效或执行状态未知；请刷新核验。');
     if (approval.threadId !== session.engineBinding?.threadId || approval.turnId !== task.nativeTurnId) throw new HttpError(409, '审批不属于当前原生执行。');
@@ -301,14 +310,21 @@ export class TaskEngine {
   async recover(sessionId: string): Promise<Session> {
     this.requireWritable();
     const session = this.requireSession(sessionId);
-    if (!this.nativeDriver || session.adapterId !== 'codex-app-server' || !session.engineBinding) throw new HttpError(409, '没有可核验的原生线程绑定。');
+    const driver = this.drivers.get(session.adapterId);
+    if (!driver) throw new HttpError(409, '没有可核验的原生线程绑定。');
+    if (session.engineBinding && !bindingMatchesDriver(session.engineBinding, driver.info.id)) throw new HttpError(409, '会话绑定与当前执行器不匹配。');
     const task = [...session.tasks].reverse().find(item => item.status === 'unknown' || item.stopUnconfirmed);
     if (!task || session.tasks.some(item => active.has(item.status)) || this.controllers.has(task.id) || this.recovering.has(sessionId)) throw new HttpError(409, '当前没有可核验的中断任务，或执行器仍在停止。');
+    if (!session.engineBinding && (session.adapterId !== 'hermes' || !task.nativeTurnId)) throw new HttpError(409, '缺少原执行的会话绑定或任务 ID，无法自动核验；请在本机检查，不能重发原消息。');
     this.recovering.add(sessionId);
     try {
       recordActivity(task, 'recovery'); this.save(session);
-      const evidence = await this.nativeDriver.recover(session.engineBinding, task.nativeTurnId);
+      const evidence = await driver.recover(session.engineBinding, task.nativeTurnId);
       if (evidence.turnId && evidence.turnId !== task.nativeTurnId) throw new Error('Native turn mismatch.');
+      if (evidence.binding) {
+        if (!bindingMatchesDriver(evidence.binding, session.adapterId) || (session.engineBinding && evidence.binding.threadId !== session.engineBinding.threadId)) throw new Error('Native recovery binding mismatch.');
+        session.engineBinding = structuredClone(evidence.binding);
+      }
       for (const message of evidence.messages) this.upsertNativeMessage(session, task, message.itemId, message.text);
       if (evidence.status === 'completed' || evidence.status === 'cancelled' || evidence.status === 'failed') {
         delete task.stopUnconfirmed;
@@ -322,6 +338,7 @@ export class TaskEngine {
       this.save(session);
       return structuredClone(session);
     } catch (error) {
+      task.stopUnconfirmed = true;
       task.error = error instanceof Error ? error.message : '无法核验原生线程。';
       this.transition(task, 'unknown', '原生回合核验未能确认终态。');
       this.save(session);
@@ -362,7 +379,11 @@ export class TaskEngine {
       this.pauseRealAdapters();
       task.error = error.message;
       this.transition(task, 'failed', error.message);
-    } else this.transition(task, 'cancelled', '已确认 Codex 执行结束，任务已取消。');
+    } else if (this.drivers.has(task.adapterId)) {
+      task.stopUnconfirmed = true;
+      task.error = '执行器没有确认停止终态；执行结果未知，请核验原任务。';
+      this.transition(task, 'unknown', task.error);
+    } else this.transition(task, 'cancelled', '已确认执行结束，任务已取消。');
     this.save(session);
   }
 
@@ -374,7 +395,8 @@ export class TaskEngine {
       if (this.closed || signal.aborted || task.status !== 'queued') return;
       const adapter = this.registry.adapters.get(task.adapterId);
       if (!adapter) throw new Error('执行适配器不可用。');
-      this.transition(task, 'running', adapter.info.kind === 'mock' ? '开始本地模拟执行。' : task.adapterId === 'codex-app-server' ? '通过原生 App Server 执行；按原生事件确认状态。' : '通过官方 Codex CLI 执行受限只读对话。');
+      const driver = this.drivers.get(session.adapterId);
+      this.transition(task, 'running', adapter.info.kind === 'mock' ? '开始本地模拟执行。' : driver ? '通过本地执行器执行；按执行回执确认状态。' : '通过官方 Codex CLI 执行受限只读对话。');
       this.save(session);
       if (task.mode === 'approval-demo' && !approved) {
         await pause(this.delayMs, signal);
@@ -398,9 +420,13 @@ export class TaskEngine {
           task.updatedAt = now();
           this.save(session);
         },
-        native: task.adapterId === 'codex-app-server' ? {
+        native: driver ? {
           binding: structuredClone(session.engineBinding),
-          onBinding: binding => { session.engineBinding = structuredClone(binding); this.save(session); },
+          onBinding: binding => {
+            if (!bindingMatchesDriver(binding, session.adapterId)) throw new NativeOutcomeUnknownError('执行器返回了不匹配的会话绑定；保持隔离。');
+            if (session.engineBinding && (session.engineBinding.threadId !== binding.threadId || session.engineBinding.driverId !== binding.driverId)) throw new NativeOutcomeUnknownError('执行器尝试更换已有会话绑定；保持隔离。');
+            session.engineBinding = structuredClone(binding); this.save(session);
+          },
           onTurn: turnId => { task.nativeTurnId = turnId; task.updatedAt = now(); this.save(session); },
           upsertMessage: (itemId, text) => {
             if (this.closed || task.status === 'unknown') return;
@@ -420,6 +446,7 @@ export class TaskEngine {
             this.save(session);
           },
           onApprovalResolved: approvalId => {
+            if (this.closed || !active.has(task.status)) return;
             const approval = task.nativeApprovals?.find(item => item.id === approvalId);
             if (approval?.status === 'pending') approval.status = 'resolved';
             if (task.status === 'awaiting_approval' && !task.nativeApprovals?.some(item => item.status === 'pending' || item.status === 'responding')) this.transition(task, 'running', '原生审批请求已撤下，等待终态。');
@@ -441,7 +468,7 @@ export class TaskEngine {
         this.save(session);
         return;
       }
-      if (task.adapterId === 'codex-app-server') throw new NativeOutcomeUnknownError('原生驱动未提供可核验终态；保持结果未知，不会自动重发。');
+      if (driver) throw new NativeOutcomeUnknownError('原生驱动未提供可核验终态；保持结果未知，不会自动重发。');
       if (signal.aborted) {
         if ((task.status as TaskStatus) === 'cancelling') this.finishCancellation(session, task);
         return;
@@ -472,7 +499,7 @@ export class TaskEngine {
     this.closed = true;
     for (const controller of this.controllers.values()) controller.abort();
     await Promise.allSettled(this.jobs);
-    await this.nativeDriver?.close();
+    await Promise.allSettled([...this.drivers.values()].map(driver => driver.close()));
     // Preserve interrupted statuses so the next process can report a restart honestly.
     this.store.close();
   }

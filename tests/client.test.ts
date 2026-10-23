@@ -27,6 +27,11 @@ const nativeBootstrap: Bootstrap = {
   adapters: [...bootstrap.adapters, { id: 'codex-app-server', name: 'Codex AppServer', description: '原生审批测试夹具', available: true, kind: 'cli' }],
 };
 
+const hermesBootstrap: Bootstrap = {
+  ...bootstrap,
+  adapters: [...bootstrap.adapters, { id: 'hermes', name: 'Hermes Agent', description: '本机协议测试夹具', available: true, kind: 'http' }],
+};
+
 function makeNativeSession(id: string, approvalOverrides: Partial<NativeApproval> = {}): Session {
   const session = makeSession(id, `原生会话 ${id}`, 'codex-app-server');
   session.engineBinding = { driverId: 'codex-app-server', threadId: `thread-${id}`, workspace: '/workspace/relaydesk', version: '0.162.1' };
@@ -351,6 +356,47 @@ test('React DOM: configured real Codex selects CLI, blocks approval demo and wai
       .find((card) => card.querySelector('h3')?.textContent === 'Codex CLI');
     assert.equal(codexCard?.querySelector('.badge')?.textContent, '已配置 · exec');
     assert.match(codexCard?.textContent ?? '', /不代表本轮调用已成功/);
+  } finally { await ui.cleanup(); }
+});
+
+test('React DOM: Hermes is a distinct execution route and task result stays visible outside drawers', async () => {
+  const ui = await mount({ bootstrap: hermesBootstrap });
+  try {
+    await ui.click('[data-adapter-id="hermes"]');
+    assert.equal(ui.query('[data-testid="adapter-mode"]').textContent, '真实 · 本机任务');
+    assert.match(ui.query('[data-testid="adapter-notice"]').textContent ?? '', /这台电脑上的 Hermes/);
+    assert.doesNotMatch(ui.query('[data-testid="adapter-notice"]').textContent ?? '', /发送到官方 Codex/);
+    assert.equal(ui.dom.window.document.querySelector('[data-testid="approval-demo"]'), null);
+    await ui.type('汇总测试目录中的文件');
+    await ui.click('[data-testid="send-message"]');
+    const session = [...ui.sessions.values()][0];
+    assert.equal(session.adapterId, 'hermes');
+    assert.match(ui.query('[data-testid="task-overview"]').textContent ?? '', /汇总测试目录中的文件/);
+    session.tasks[0].status = 'cancelling';
+    await ui.publish(session);
+    assert.equal(ui.query('[data-testid="task-overview-status"]').textContent, '正在停止');
+    assert.match(ui.query('[data-testid="task-overview"]').textContent ?? '', /等待执行器确认结束/);
+    await ui.finish(session, '合成结果：共 3 个文件。');
+    const summary = ui.query('[data-testid="task-overview"]');
+    assert.equal(summary.closest('.drawer'), null);
+    assert.match(summary.textContent ?? '', /已完成.*结果.*共 3 个文件.*下一步/s);
+    assert.match(ui.query('.message-real').textContent ?? '', /真实 · 本机任务/);
+  } finally { await ui.cleanup(); }
+});
+
+test('React DOM: a Hermes accepted run can be inspected after disconnect before session binding was saved', async () => {
+  const session = makeSession('hermes-window', '已接收的任务', 'hermes');
+  session.tasks.push({ id: 'relay-task', sessionId: session.id, adapterId: 'hermes', prompt: '不重放', mode: 'chat', status: 'unknown', stopUnconfirmed: true, nativeTurnId: 'accepted-run', createdAt: timestamp, updatedAt: timestamp, events: [] });
+  const recovered = structuredClone(session);
+  recovered.tasks[0].status = 'completed';
+  delete recovered.tasks[0].stopUnconfirmed;
+  const ui = await mount({ bootstrap: hermesBootstrap, sessions: [session], selected: session.id, recoveredSession: recovered });
+  try {
+    assert.equal(ui.query('[data-testid="task-overview-status"]').textContent, '结果待确认');
+    assert.ok(ui.query<HTMLTextAreaElement>('#message-input').disabled);
+    await ui.click('[data-testid="native-recover"]');
+    assert.equal(ui.query('[data-testid="task-overview-status"]').textContent, '已完成');
+    assert.equal(ui.requests.filter(request => request.method === 'POST' && request.path.endsWith('/tasks')).length, 0);
   } finally { await ui.cleanup(); }
 });
 

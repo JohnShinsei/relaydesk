@@ -8,6 +8,8 @@ import type { EngineBinding, EngineDriver, ExecutionContext, NativeActivityKind,
 import { codexEnvironment } from './codex-adapter.ts';
 import { JsonRpcPeer } from './json-rpc.ts';
 import type { RpcId } from './json-rpc.ts';
+import { NativeOutcomeUnknownError } from './execution.ts';
+export { NativeOutcomeUnknownError } from './execution.ts';
 
 type RecordValue = Record<string, unknown>;
 type SpawnProcess = (executable: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
@@ -30,9 +32,6 @@ export interface CodexAppServerOptions {
   spawnProcess?: SpawnProcess;
   versionProbe?: VersionProbe;
 }
-
-/** A native turn may have been accepted. Recovery must inspect its exact ID, never resubmit. */
-export class NativeOutcomeUnknownError extends Error {}
 
 const disabled = ['shell_tool', 'unified_exec', 'apps', 'plugins', 'remote_plugin', 'browser_use', 'browser_use_external', 'browser_use_full_cdp_access', 'in_app_browser', 'computer_use', 'image_generation', 'multi_agent', 'multi_agent_v2', 'hooks', 'skill_mcp_dependency_install', 'tool_suggest', 'workspace_dependencies', 'memories', 'shell_snapshot', 'shell_snapshot_v2'];
 const restrictions: RecordValue = {
@@ -508,6 +507,7 @@ export function createCodexAppServerDriver(options: CodexAppServerOptions): Engi
       } catch { fail(run, uncertain); throw new NativeOutcomeUnknownError('审批响应写出状态不明，不会自动重放决定。'); }
     },
     async recover(binding, turnId) {
+      if (!binding) throw new Error('原生会话绑定缺失，无法核验。');
       available(); validateBinding(binding);
       if (!identifier(turnId)) return { status: 'unknown', messages: [], error: uncertain };
       busy = true;
