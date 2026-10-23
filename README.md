@@ -2,7 +2,7 @@
 
 让人在国内，通过任务控制台使用日本电脑上的 AI 执行器。第一版服务**一个用户、一台日本 Windows 电脑、同一时间一个真实任务**。
 
-**当前是本地原型，尚未完成远程部署。** 本次重整保留 Codex 与模拟功能，新增默认关闭的 Hermes HTTP 驱动，并把主流程收敛到任务、状态、结果和下一步。真实 Hermes API、国内到日本的连接、Windows 桌面操作与锁屏恢复均未验收。
+**当前是本地原型，尚未完成远程部署。** 本次重整保留 Codex 与模拟功能，新增默认关闭的 Hermes HTTP 和 Claude Agent SDK 驱动，并把主流程收敛到任务、状态、结果和下一步。真实 Hermes API、国内到日本的连接、Windows 桌面操作与锁屏恢复均未验收。
 
 ## 第一版的分工
 
@@ -10,11 +10,11 @@
 国内浏览器
   → 经身份验证的远程访问层（待实现 / 验收）
   → 日本电脑上的 RelayDesk 单服务
-  → 本机 Hermes API
+  → 本机执行器（Hermes API / Claude Agent SDK / Codex）
   → 文件、浏览器或桌面任务（逐项验收）
 ```
 
-RelayDesk 负责提交、记录任务、展示状态、单次审批和停止。Hermes 负责执行与执行状态。连接程序先放在 RelayDesk 服务内；需要中转时再增加只负责转发的 Hub。
+RelayDesk 负责提交、记录任务、展示状态、单次审批和停止。各执行器负责执行与提供真实状态。连接程序先放在 RelayDesk 服务内；需要中转时再增加只负责转发的 Hub。
 
 服务固定监听 `127.0.0.1:4317`，没有远程用户认证。**不要直接公开端口或接入公网隧道。** Host/Origin 校验不等于远程身份验证。
 
@@ -30,7 +30,8 @@ RelayDesk 负责提交、记录任务、展示状态、单次审批和停止。H
 | 远程入口、认证、跨境连接 | planned | 本轮不部署、不开放端口 |
 | Windows 桌面控制、截图与文件下载 | planned | 没有端到端成品交付链路 |
 | 微信工作收件箱 | mock / 保留演示 | 合成消息与模拟发送，没有真实微信连接 |
-| Claude、邮件、消息机器人、多设备 | planned | 不属于第一版主流程 |
+| Claude Agent SDK | 可选接入，默认关闭 | SDK / CLI 安装不证明 Code 已登录；真实任务、审批与恢复须独立验证 |
+| 邮件、消息机器人、多设备 | planned | 不属于第一版主流程 |
 
 [历史验证记录](docs/verification.md)中的 Codex `0.162.1`、特定模型、macOS 环境和测试数量属于原有记录，不能作为当前 Windows / Hermes / 跨境链路的通过证据。
 
@@ -76,9 +77,15 @@ npm start
 
 Codex 接入继续按 [原生驱动文档](docs/native-driver.md)使用；旧模式见 [原有集成设计](docs/real-integration-design.md)。真实执行器都需要本机显式启用。
 
+## 可选 Claude 接入
+
+RelayDesk 通过官方 Claude Agent SDK 调用 Code 执行任务，不自动点击或接管 Claude Desktop。日常仍可使用 Desktop；执行任务时按需启动 CLI 子进程，任务结束后关闭，无需为 RelayDesk 保持 Desktop 常驻。实际内存差异需在相同任务下测量，本轮没有内存对比，也不会关闭已有桌面进程。
+
+Desktop 登录不等于独立 Code 已登录。按 [Claude 接入说明](docs/claude-integration.md)检查官方 CLI 登录状态；需要时由本人完成浏览器登录。默认禁用，固定工作目录 `.data/claude-native-workspace`；模型和环境访问由本机操作者配置，凭据不交给网页。当前套餐、认证路径和实际扣费应独立核对，不从一次响应推断订阅额度或 API 账单。
+
 ## 检查与下一步
 
-本次 [本地重整验证记录](docs/current-verification.md)：154 项自动化测试、类型检查、lint、构建通过；已完成桌面浏览器模拟任务验收。真实 Hermes、手机、跨境连接与桌面操作另行验收。
+本次 [本地重整验证记录](docs/current-verification.md)：加入 Claude 后的 177 项自动化测试、类型检查、lint、构建全部通过，依赖审计为 0 已知漏洞；官方 Claude CLI 隔离预检、独立登录与最小无工具真实文本回合通过。首次重整已完成桌面浏览器模拟任务验收；追加 Claude 界面由 DOM 测试覆盖。真实工具、手机、跨境连接与桌面操作另行验收。
 
 ```sh
 npm run check
@@ -92,6 +99,7 @@ npm run check
 
 - [架构与状态语义](docs/architecture.md)
 - [Hermes 接入与真实验收](docs/hermes-integration.md)
+- [Claude 接入与登录边界](docs/claude-integration.md)
 - [分阶段路线图](docs/roadmap.md)
 - [API 契约](docs/api-contract.md)
 - [历史验证记录](docs/verification.md)

@@ -48,21 +48,29 @@ test('task feed and activity project only bounded native metadata, never convers
     { seq: 3, at: time, kind: 'file-change', label: secret },
     { seq: 4, at: time, kind: secret, label: secret } as unknown as TaskActivity,
   ];
-  const excluded = (['mock-codex', 'mock-claude', 'codex', 'claude'] as const).map(id => session(task(`excluded-${id}`, id)));
-  const engine = new TaskEngine(':memory:', 1, undefined, { store: snapshots([session(item), ...excluded]) });
+  const excluded = (['mock-codex', 'mock-claude', 'codex'] as const).map(id => session(task(`excluded-${id}`, id)));
+  const claude = session(task('claude-private', 'claude'));
+  claude.engineBinding = { driverId: 'claude', threadId: 'private-claude-thread', workspace: `/synthetic/${secret}`, version: 'synthetic-sdk' };
+  claude.tasks[0].nativeApprovals = [approval(20)];
+  claude.tasks[0].activity = [{ seq: 1, at: time, kind: 'command', label: secret }];
+  const engine = new TaskEngine(':memory:', 1, undefined, { store: snapshots([session(item), claude, ...excluded]) });
   t.after(() => engine.close());
   const feed = engine.taskFeed({ scope: 'all' });
   const activity = engine.taskActivity(item.id);
-  assert.deepEqual(feed.items.map(row => row.id), [item.id]);
-  assert.equal(feed.activeCount, 1); assert.equal(feed.historyCount, 0);
+  assert.deepEqual(feed.items.map(row => row.id), [item.id, claude.tasks[0].id]);
+  assert.equal(feed.activeCount, 1); assert.equal(feed.historyCount, 1);
   assert.equal(feed.items[0].pendingApprovalCount, 14);
   assert.equal(feed.items[0].pendingApprovals.length, 10);
   assert.match(feed.items[0].project!.id, /^workspace-[a-f0-9]{16}$/);
+  assert.equal(feed.items[1].provider, 'Claude');
+  assert.equal(feed.items[1].project!.label, 'Claude Agent 本地工作区');
+  assert.match(feed.items[1].project!.id, /^workspace-[a-f0-9]{16}$/);
+  assert.equal(feed.items[1].project!.id, feed.items[0].project!.id);
   assert.deepEqual(activity.items.map(row => row.kind), ['file-change', 'command', 'reasoning']);
   assert.ok(activity.items.every(row => Object.keys(row).sort().join(',') === 'at,kind,label,seq'));
   assert.ok(feed.items[0].pendingApprovals.every(row => Object.keys(row).sort().join(',') === 'createdAt,expiresAt,id,kind,status'));
-  const serialized = JSON.stringify({ feed, activity });
-  for (const forbidden of [secret, 'private-native-thread', '/synthetic/', 'allowedDecisions', 'requestId', 'messages', 'prompt', 'error', 'changes']) assert.ok(!serialized.includes(forbidden), forbidden);
+  const serialized = JSON.stringify({ feed, activity, claudeActivity: engine.taskActivity(claude.tasks[0].id) });
+  for (const forbidden of [secret, 'private-native-thread', 'private-claude-thread', '/synthetic/', 'allowedDecisions', 'requestId', 'messages', 'prompt', 'error', 'changes']) assert.ok(!serialized.includes(forbidden), forbidden);
   for (const row of excluded) assert.throws(() => engine.taskActivity(row.tasks[0].id), error => error instanceof HttpError && error.status === 404);
 });
 

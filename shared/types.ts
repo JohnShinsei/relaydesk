@@ -15,6 +15,7 @@ export interface NativeApproval {
 }
 export type EngineBinding =
   | { driverId: 'codex-app-server'; threadId: string; workspace: string; version: '0.162.1' }
+  | { driverId: 'claude'; threadId: string; workspace: string; version: string }
   | { driverId: 'hermes'; threadId: string; version: string };
 export interface Task { id: string; sessionId: string; adapterId: AdapterId; prompt: string; mode: TaskMode; status: TaskStatus; createdAt: string; updatedAt: string; error?: string; stopUnconfirmed?: boolean; nativeTurnId?: string; nativeApprovals?: NativeApproval[]; approval?: { title: string; description: string }; events: { status: TaskStatus; at: string; detail: string }[]; startedAt?: string; endedAt?: string; lastActivityAt?: string; activity?: TaskActivity[]; activitySeq?: number; idempotencyKey?: string }
 export interface Session { id: string; title: string; adapterId: AdapterId; createdAt: string; updatedAt: string; messages: Message[]; tasks: Task[]; engineBinding?: EngineBinding }
@@ -27,7 +28,7 @@ export type TaskActivityKind = NativeActivityKind | TaskStatus | 'approval-resol
 export interface TaskActivity { seq: number; at: string; kind: TaskActivityKind; label: string }
 export type TaskFeedScope = 'active' | 'history' | 'all';
 export interface TaskFeedItem {
-  id: string; sessionId: string; adapterId: 'codex-app-server' | 'hermes'; provider: 'Codex' | 'Hermes'; title: string;
+  id: string; sessionId: string; adapterId: 'codex-app-server' | 'hermes' | 'claude'; provider: 'Codex' | 'Hermes' | 'Claude'; title: string;
   project: { id: string; label: string } | null;
   status: TaskStatus; createdAt: string; startedAt?: string; endedAt?: string;
   elapsedMs: number; lastActivityAt: string; currentActivity: TaskActivity | null; stopUnconfirmed: boolean;

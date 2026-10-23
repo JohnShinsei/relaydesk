@@ -18,6 +18,7 @@
     "check": "npm run typecheck && npm run lint && npm test && npm run build"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.309",
     "lucide-react": "^0.468.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"

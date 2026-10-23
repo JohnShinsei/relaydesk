@@ -7,6 +7,7 @@ import { NativeOutcomeUnknownError } from '../server/execution.ts';
 
 const binding: EngineBinding = { driverId: 'hermes', threadId: 'hermes-session', version: 'test-version' };
 const codexBinding: EngineBinding = { driverId: 'codex-app-server', threadId: 'codex-session', workspace: '/synthetic', version: '0.162.1' };
+const claudeBinding: EngineBinding = { driverId: 'claude', threadId: 'claude-session', workspace: '/synthetic/claude-private', version: 'test-sdk' };
 function store(initial: Session[] = []) {
   const rows = new Map(initial.map(row => [row.id, structuredClone(row)]));
   return { all: () => [...rows.values()].map(row => structuredClone(row)), save: (row: Session) => { rows.set(row.id, structuredClone(row)); }, close() {} };
@@ -14,6 +15,9 @@ function store(initial: Session[] = []) {
 function driver(execute: EngineDriver['execute'], recover?: EngineDriver['recover']): EngineDriver {
   return { info: { id: 'hermes', kind: 'http', available: true, name: 'Hermes fixture', description: 'Offline only' }, execute,
     async decideApproval() {}, recover: recover ?? (async () => ({ status: 'unknown', messages: [] })), async close() {} };
+}
+function claudeDriver(execute: EngineDriver['execute'], recover?: EngineDriver['recover']): EngineDriver {
+  return { ...driver(execute, recover), info: { id: 'claude', kind: 'cli', available: true, name: 'Claude Agent', description: 'Offline SDK fixture' } };
 }
 async function state(engine: TaskEngine, sessionId: string, status: TaskStatus) {
   for (let i = 0; i < 250; i++) {
@@ -161,4 +165,68 @@ test('Hermes recovery cannot adopt evidence for a different driver or run', asyn
     const result = engine.get(saved.id); assert.equal(result.tasks[0].status, 'unknown'); assert.equal(result.tasks[0].stopUnconfirmed, true);
     assert.deepEqual(result.engineBinding, binding);
   }
+});
+
+test('Claude Agent remains disabled by default and routes scoped approvals to its configured driver', async t => {
+  const disabled = new TaskEngine(':memory:', 1); t.after(() => disabled.close());
+  const catalog = disabled.catalog().find(info => info.id === 'claude')!;
+  assert.equal(catalog.name, 'Claude Agent'); assert.equal(catalog.available, false);
+  assert.throws(() => disabled.create('claude'), /尚未启用/);
+  let finish!: () => void; let decisions = 0;
+  const claude = claudeDriver(async ({ native, signal }) => {
+    await native!.onBinding(claudeBinding); await native!.onTurn('claude-turn');
+    await native!.onActivity!('command');
+    await native!.onApproval({ ...approval(), id: 'claude-approval', threadId: claudeBinding.threadId, turnId: 'claude-turn' });
+    await new Promise<void>(resolve => { finish = resolve; signal.addEventListener('abort', () => resolve(), { once: true }); });
+    await native!.upsertMessage('answer', 'Scoped result'); await native!.onTerminal('completed');
+  });
+  claude.decideApproval = async (id, decision) => { assert.equal(id, 'claude-approval'); assert.equal(decision, 'decline'); decisions++; finish(); };
+  const hermes = driver(async () => assert.fail('Must not route Claude to Hermes'));
+  const engine = new TaskEngine(':memory:', 1, undefined, { drivers: [claude, hermes] }); t.after(() => engine.close());
+  const session = engine.create('claude'); const other = engine.create('hermes');
+  const task = engine.submit(session.id, 'Synthetic request', 'chat');
+  assert.throws(() => engine.submit(other.id, 'Must wait', 'chat'), /这台电脑已有/);
+  await state(engine, session.id, 'awaiting_approval');
+  const feed = engine.taskFeed().items[0];
+  assert.equal(feed.provider, 'Claude'); assert.equal(feed.adapterId, 'claude'); assert.match(feed.title, /^Claude Agent 任务 /);
+  assert.match(feed.project!.id, /^workspace-[a-f0-9]{16}$/); assert.equal(feed.project!.label, 'Claude Agent 本地工作区');
+  assert.ok(!JSON.stringify(feed).includes(claudeBinding.workspace));
+  await engine.decideNativeApproval(task.id, 'claude-approval', 'decline');
+  const done = await state(engine, session.id, 'completed');
+  assert.equal(decisions, 1); assert.equal(done.tasks[0].nativeApprovals![0].status, 'declined');
+  assert.equal(engine.taskFeed({ scope: 'history' }).items[0].provider, 'Claude');
+});
+
+test('Claude Agent unconfirmed cancellation stays unknown and recovers only its bound turn without replay', async t => {
+  let executions = 0; let reads = 0;
+  const claude = claudeDriver(async ({ native, signal }) => {
+    executions++; await native!.onBinding(claudeBinding); await native!.onTurn('claude-turn');
+    await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }));
+  }, async (saved, turn) => {
+    reads++; assert.deepEqual(saved, claudeBinding); assert.equal(turn, 'claude-turn');
+    return { turnId: turn, status: 'cancelled', messages: [] };
+  });
+  const snapshots = store();
+  const engine = new TaskEngine(':memory:', 1, undefined, { drivers: [claude], store: snapshots }); t.after(() => engine.close());
+  const session = engine.create('claude'); const other = engine.create('claude');
+  const task = engine.submit(session.id, 'No replay', 'chat'); await state(engine, session.id, 'running');
+  assert.equal(engine.cancel(task.id).status, 'cancelling'); await state(engine, session.id, 'unknown');
+  assert.throws(() => engine.submit(other.id, 'Must wait', 'chat'), /这台电脑已有/);
+  await engine.close();
+  const restarted = new TaskEngine(':memory:', 1, undefined, { drivers: [claude], store: snapshots }); t.after(() => restarted.close());
+  const result = await restarted.recover(session.id);
+  assert.equal(result.tasks[0].status, 'cancelled'); assert.equal(result.tasks[0].stopUnconfirmed, undefined);
+  assert.equal(reads, 1); assert.equal(executions, 1);
+});
+
+test('Claude Agent cannot recover with only a turn ID or a binding from another provider', async t => {
+  let reads = 0;
+  const claude = claudeDriver(async () => assert.fail('No replay'), async () => { reads++; return { status: 'completed', messages: [] }; });
+  for (const savedBinding of [undefined, binding, codexBinding]) {
+    const session = interrupted(); session.adapterId = 'claude'; session.tasks[0].adapterId = 'claude'; session.engineBinding = savedBinding;
+    const engine = new TaskEngine(':memory:', 1, undefined, { drivers: [claude], store: store([session]) }); t.after(() => engine.close());
+    await assert.rejects(engine.recover(session.id), savedBinding ? /不匹配/ : /无法自动核验/);
+    assert.equal(engine.get(session.id).tasks[0].status, 'unknown');
+  }
+  assert.equal(reads, 0);
 });

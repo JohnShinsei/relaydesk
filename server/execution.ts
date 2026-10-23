@@ -4,7 +4,7 @@ import type { AdapterId, EngineBinding } from '../shared/types.ts';
 export class NativeOutcomeUnknownError extends Error {}
 
 export function isDriverAdapterId(id: AdapterId): id is EngineBinding['driverId'] {
-  return id === 'codex-app-server' || id === 'hermes';
+  return id === 'codex-app-server' || id === 'hermes' || id === 'claude';
 }
 
 /** Driver bindings are local persisted evidence, never browser-supplied execution targets. */

@@ -11,7 +11,7 @@ const active = new Set<TaskStatus>(['queued', 'running', 'awaiting_approval', 'c
 const now = () => new Date().toISOString();
 const interruptedReason = '存在未确认结束的真实任务，真实适配器已暂停；请先检查本地进程，再由本机操作员确认。';
 const storageReason = '本地存储写入失败；本次状态未确认保存，已请求停止执行。请检查磁盘后重启服务。';
-const isReal = (task: Task) => task.adapterId === 'codex' || task.adapterId === 'claude' || isDriverAdapterId(task.adapterId);
+const isReal = (task: Task) => task.adapterId === 'codex' || isDriverAdapterId(task.adapterId);
 interface EngineOptions {
   nativeDriver?: EngineDriver;
   drivers?: EngineDriver[];

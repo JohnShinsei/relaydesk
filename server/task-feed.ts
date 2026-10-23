@@ -46,11 +46,12 @@ function taskItem(session: Session, task: Task, at: number): TaskFeedItem {
   const end = isoTime(task.endedAt) ? task.endedAt : currentStatuses.has(status) ? undefined : timestamp(task);
   const pending = (task.nativeApprovals ?? []).filter(item => item.status === 'pending' || item.status === 'responding');
   if (!isDriverAdapterId(task.adapterId)) throw new FeedInputError('此任务没有执行器活动记录。');
-  const provider = task.adapterId === 'hermes' ? 'Hermes' : 'Codex';
+  const provider = task.adapterId === 'hermes' ? 'Hermes' : task.adapterId === 'claude' ? 'Claude' : 'Codex';
+  const label = provider === 'Claude' ? 'Claude Agent' : provider;
   const binding = session.engineBinding;
   return {
-    id: task.id, sessionId: session.id, adapterId: task.adapterId, provider, title: `${provider} 任务 ${task.id.slice(0, 8)}`,
-    project: binding?.driverId === 'codex-app-server' && task.adapterId === binding.driverId ? { id: `workspace-${createHash('sha256').update(binding.workspace).digest('hex').slice(0, 16)}`, label: 'Codex 本地工作区' } : null,
+    id: task.id, sessionId: session.id, adapterId: task.adapterId, provider, title: `${label} 任务 ${task.id.slice(0, 8)}`,
+    project: binding && 'workspace' in binding && task.adapterId === binding.driverId ? { id: `workspace-${createHash('sha256').update(binding.workspace).digest('hex').slice(0, 16)}`, label: `${label} 本地工作区` } : null,
     status, createdAt: safeTime(task.createdAt), ...(isoTime(task.startedAt) ? { startedAt: task.startedAt } : {}), ...(end ? { endedAt: end } : {}),
     elapsedMs: Math.max(0, (end ? Date.parse(end) : at) - Date.parse(start)), lastActivityAt,
     currentActivity: activities.at(-1) ?? { seq: 0, at: lastActivityAt, kind: status, label: activityLabels[status] },

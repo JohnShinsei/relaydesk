@@ -14,6 +14,16 @@ Loopback 与能力探测不是执行沙箱。Hermes API 使用其配置的工具
 
 Hermes 幂等记录有有限保留期和凭据作用域，不能宣称永久或跨配置 exactly-once。更换 API key / profile 前先核对所有未完成任务；当前不会把凭据变更视为已停止旧工作。其他本机 Hermes 入口与人工桌面操作不受 RelayDesk 单任务锁约束。
 
+## Claude Agent SDK
+
+Claude 作为默认关闭的可选执行器，通过官方 SDK / CLI 按需启动子进程，不提供 Desktop 的脚本控制，也不接管其会话。Desktop 登录不证明独立 Code 已登录；认证只能通过官方 CLI 状态与正常登录流程核验。不得提取或复制 Desktop cookie、OAuth、账号令牌或私有凭据，不提供 token broker。驱动仅接受第一方订阅登录，发送前检查 SDK 账户信息；环境白名单不给 API key / Bearer / 云认证覆盖。认证失败不切换付费 API 路径或新建重复任务。
+
+本机操作者选择可执行文件和模型，工作目录固定为 `.data/claude-native-workspace`；浏览器不能覆盖这些配置。权限按驱动允许范围和具体一次审批控制，禁止把模糊任务描述当成永久授权。默认 tools 为空；可选环境访问仅承诺 Read/Glob/Grep 并逐次审批，Bash/Edit/Write 拒绝。Windows shell、目录转换与派生进程停止未经可靠验证，因此第一版不开放命令工具。工具控制不是完整操作系统隔离，真实工具和 Windows 权限边界须单独验收；SDK 的 hooks 禁用配置不屏蔽组织 managed hooks，不承诺未知组织配置下的完整隔离。
+
+session / turn 对应关系持久化后才用于续接、审批或历史核对。停止要确认执行结束，无法确认时进入 unknown；重启不自动重发输入，不按最后一条会话猜测本轮结果。当前 SDK 恢复只读消息但不能证明执行终态，仍返回 unknown；无 HTTP 解锁捷径，持久终态回执与人工恢复流程后续补齐。SDK 任务结束后关闭其查询 / 子进程，不会关闭用户已有的 Desktop 或其他 Code 会话。资源释放与内存节省是不同问题，后者尚未测量。
+
+实际订阅、API credits 或其他账单来源以官方支持范围、所选认证方式和账号记录为准，不能从 SDK 的费用估计或单次响应推断。配置与验收见 [Claude 接入](docs/claude-integration.md)。
+
 ## 保留的 Codex 驱动
 
 Codex 使用操作者指定的官方 CLI、固定参数和工作目录，直接启动子进程而非 shell；浏览器无通用 RPC 代理。旧 exec 用 stdin 文本历史，原生 App Server 使用私有 stdio 与持久线程。使用官方正常登录，不复制认证文件或提供 token broker。
