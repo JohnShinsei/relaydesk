@@ -1,19 +1,22 @@
-export type AdapterId = 'mock-codex' | 'mock-claude' | 'codex' | 'codex-app-server' | 'claude';
+export type AdapterId = 'mock-codex' | 'mock-claude' | 'codex' | 'codex-app-server' | 'claude' | 'hermes';
 export type TaskStatus = 'queued' | 'running' | 'awaiting_approval' | 'cancelling' | 'completed' | 'cancelled' | 'failed' | 'unknown';
 export type TaskMode = 'chat' | 'approval-demo';
-export interface AdapterInfo { id: AdapterId; name: string; description: string; available: boolean; kind: 'mock' | 'cli'; reason?: string }
+export interface AdapterInfo { id: AdapterId; name: string; description: string; available: boolean; kind: 'mock' | 'cli' | 'http'; reason?: string }
 export interface ChannelInfo { id: string; name: string; status: 'local' | 'planned'; description: string }
 export interface Message { id: string; role: 'user' | 'assistant' | 'system'; content: string; createdAt: string; taskId: string; nativeItemId?: string }
 export type NativeApprovalDecision = 'accept' | 'decline' | 'cancel';
 export interface NativeApproval {
-  id: string; kind: 'command' | 'file-change'; requestId: string | number;
+  id: string; kind: 'command' | 'file-change' | 'tool'; requestId: string | number;
   threadId: string; turnId: string; itemId: string; operation: string; cwd?: string;
   changes?: { path: string; diff: string }[];
   allowedDecisions: NativeApprovalDecision[];
   status: 'pending' | 'responding' | 'accepted' | 'declined' | 'cancelled' | 'expired' | 'resolved' | 'unknown';
   createdAt: string; expiresAt: string; decidedAt?: string; decision?: NativeApprovalDecision;
 }
-export interface EngineBinding { driverId: 'codex-app-server'; threadId: string; workspace: string; version: '0.162.1' }
+export type EngineBinding =
+  | { driverId: 'codex-app-server'; threadId: string; workspace: string; version: '0.162.1' }
+  | { driverId: 'claude'; threadId: string; workspace: string; version: string }
+  | { driverId: 'hermes'; threadId: string; version: string };
 export interface Task { id: string; sessionId: string; adapterId: AdapterId; prompt: string; mode: TaskMode; status: TaskStatus; createdAt: string; updatedAt: string; error?: string; stopUnconfirmed?: boolean; nativeTurnId?: string; nativeApprovals?: NativeApproval[]; approval?: { title: string; description: string }; events: { status: TaskStatus; at: string; detail: string }[]; startedAt?: string; endedAt?: string; lastActivityAt?: string; activity?: TaskActivity[]; activitySeq?: number; idempotencyKey?: string }
 export interface Session { id: string; title: string; adapterId: AdapterId; createdAt: string; updatedAt: string; messages: Message[]; tasks: Task[]; engineBinding?: EngineBinding }
 export interface SessionSummary { id: string; title: string; adapterId: AdapterId; createdAt: string; updatedAt: string; lastMessage: string; status: TaskStatus | 'idle' }
@@ -25,7 +28,7 @@ export type TaskActivityKind = NativeActivityKind | TaskStatus | 'approval-resol
 export interface TaskActivity { seq: number; at: string; kind: TaskActivityKind; label: string }
 export type TaskFeedScope = 'active' | 'history' | 'all';
 export interface TaskFeedItem {
-  id: string; sessionId: string; adapterId: 'codex-app-server'; provider: 'Codex'; title: string;
+  id: string; sessionId: string; adapterId: 'codex-app-server' | 'hermes' | 'claude'; provider: 'Codex' | 'Hermes' | 'Claude'; title: string;
   project: { id: string; label: string } | null;
   status: TaskStatus; createdAt: string; startedAt?: string; endedAt?: string;
   elapsedMs: number; lastActivityAt: string; currentActivity: TaskActivity | null; stopUnconfirmed: boolean;
@@ -48,11 +51,11 @@ export interface NativeExecutionContext {
 }
 export interface ExecutionContext { task: Task; history: Message[]; signal: AbortSignal; emit: (chunk: string) => void; native?: NativeExecutionContext }
 export interface ExecutionAdapter { info: AdapterInfo; execute(context: ExecutionContext): Promise<void> }
-export interface NativeRecovery { turnId?: string; status: 'completed' | 'cancelled' | 'failed' | 'running' | 'unknown'; messages: { itemId: string; text: string }[]; error?: string }
+export interface NativeRecovery { binding?: EngineBinding; turnId?: string; status: 'completed' | 'cancelled' | 'failed' | 'running' | 'unknown'; messages: { itemId: string; text: string }[]; error?: string }
 /** Native protocol boundary: no browser-supplied commands, cwd, model or native IDs. */
 export interface EngineDriver extends ExecutionAdapter {
   decideApproval(approvalId: string, decision: NativeApprovalDecision): Promise<void>;
-  recover(binding: EngineBinding, turnId?: string): Promise<NativeRecovery>;
+  recover(binding: EngineBinding | undefined, turnId?: string): Promise<NativeRecovery>;
   close(): Promise<void>;
 }
 // Incoming messages are untrusted data. No connector is allowed to execute an action on receipt.

@@ -159,6 +159,19 @@ test('Task activity DOM: real project metadata filters correctly and opens the e
   } finally { await ui.cleanup(); }
 });
 
+test('Task activity DOM: Claude Agent and Hermes cards identify their actual execution routes', async () => {
+  const ui = await mount({ feeds: [feed('active', [
+    item('claude-route', { adapterId: 'claude', provider: 'Claude', title: 'Claude Agent 任务' }),
+    item('hermes-route', { adapterId: 'hermes', provider: 'Hermes' }), item('codex-route'),
+  ])] });
+  try {
+    assert.match(ui.query('[data-task-id="claude-route"] .activity-project').textContent ?? '', /Claude Agent · SDK/);
+    assert.match(ui.query('[data-task-id="hermes-route"] .activity-project').textContent ?? '', /Hermes · 本机 API/);
+    for (const id of ['claude-route', 'hermes-route']) assert.doesNotMatch(ui.query(`[data-task-id="${id}"] .activity-project`).textContent ?? '', /AppServer/);
+    assert.match(ui.query('[data-task-id="codex-route"] .activity-project').textContent ?? '', /Codex · AppServer/);
+  } finally { await ui.cleanup(); }
+});
+
 test('Task activity DOM: a fresh SSE snapshot supersedes a late initial GET and reconnect awaits evidence', async () => {
   const ui = await mount({ defer: (url) => url.pathname === '/api/task-feed' });
   try {

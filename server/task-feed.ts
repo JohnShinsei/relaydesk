@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
 import type { Session, Task, TaskActivity, TaskActivityKind, TaskActivityPage, TaskFeedItem, TaskFeedPage, TaskFeedScope, TaskStatus } from '../shared/types.ts';
+import { isDriverAdapterId } from './execution.ts';
 
 export const activityLimit = 200;
 export const activityLabels: Record<TaskActivityKind, string> = {
-  queued: '任务已排队', running: '正在启动原生任务', connecting: '正在连接本地 Codex',
-  'thread-ready': '原生会话已就绪', 'turn-started': 'Codex 已开始本回合',
+  queued: '任务已排队', running: '正在启动原生任务', connecting: '正在连接本地执行器',
+  'thread-ready': '原生会话已就绪', 'turn-started': '执行器已开始本回合',
   reasoning: '正在处理请求', answering: '正在生成回复', command: '原生命令活动', 'file-change': '原生文件修改活动',
   awaiting_approval: '等待单次人工审批', 'approval-resolved': '审批状态已更新',
   cancelling: '已请求取消，等待原生确认', completed: '原生任务已完成', cancelled: '已确认任务取消',
@@ -21,7 +22,7 @@ const timestamp = (task: Task) => isoTime(task.updatedAt) ? task.updatedAt : saf
 
 /** Coalesce consecutive categories while keeping the latest real activity timestamp. */
 export function recordActivity(task: Task, kind: TaskActivityKind, at = new Date().toISOString()) {
-  if (task.adapterId !== 'codex-app-server') return;
+  if (!isDriverAdapterId(task.adapterId)) return;
   if (!safeKind(kind)) throw new FeedInputError('不支持此任务活动类型。');
   task.updatedAt = at;
   task.lastActivityAt = at;
@@ -44,9 +45,13 @@ function taskItem(session: Session, task: Task, at: number): TaskFeedItem {
   const start = isoTime(task.startedAt) ? task.startedAt : safeTime(task.createdAt);
   const end = isoTime(task.endedAt) ? task.endedAt : currentStatuses.has(status) ? undefined : timestamp(task);
   const pending = (task.nativeApprovals ?? []).filter(item => item.status === 'pending' || item.status === 'responding');
+  if (!isDriverAdapterId(task.adapterId)) throw new FeedInputError('此任务没有执行器活动记录。');
+  const provider = task.adapterId === 'hermes' ? 'Hermes' : task.adapterId === 'claude' ? 'Claude' : 'Codex';
+  const label = provider === 'Claude' ? 'Claude Agent' : provider;
+  const binding = session.engineBinding;
   return {
-    id: task.id, sessionId: session.id, adapterId: 'codex-app-server', provider: 'Codex', title: `Codex 任务 ${task.id.slice(0, 8)}`,
-    project: session.engineBinding ? { id: `workspace-${createHash('sha256').update(session.engineBinding.workspace).digest('hex').slice(0, 16)}`, label: 'Codex 本地工作区' } : null,
+    id: task.id, sessionId: session.id, adapterId: task.adapterId, provider, title: `${label} 任务 ${task.id.slice(0, 8)}`,
+    project: binding && 'workspace' in binding && task.adapterId === binding.driverId ? { id: `workspace-${createHash('sha256').update(binding.workspace).digest('hex').slice(0, 16)}`, label: `${label} 本地工作区` } : null,
     status, createdAt: safeTime(task.createdAt), ...(isoTime(task.startedAt) ? { startedAt: task.startedAt } : {}), ...(end ? { endedAt: end } : {}),
     elapsedMs: Math.max(0, (end ? Date.parse(end) : at) - Date.parse(start)), lastActivityAt,
     currentActivity: activities.at(-1) ?? { seq: 0, at: lastActivityAt, kind: status, label: activityLabels[status] },
@@ -58,7 +63,7 @@ export interface FeedQuery { scope?: TaskFeedScope; limit?: number; cursor?: str
 export function makeTaskFeed(sessions: Iterable<Session>, revision: string, query: FeedQuery = {}): TaskFeedPage {
   const { scope = 'active', limit = 30, cursor } = query;
   if (!['active', 'history', 'all'].includes(scope) || !Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw new FeedInputError('任务列表筛选或页大小无效。');
-  const all = [...sessions].flatMap(session => session.tasks.filter(task => task.adapterId === 'codex-app-server').map(task => ({ session, task })));
+  const all = [...sessions].flatMap(session => session.tasks.filter(task => isDriverAdapterId(task.adapterId)).map(task => ({ session, task })));
   const activeCount = all.filter(({ task }) => currentStatuses.has(task.status)).length;
   const matching = all.filter(({ task }) => scope === 'all' || (scope === 'active') === currentStatuses.has(task.status))
     .sort((a, b) => b.task.createdAt.localeCompare(a.task.createdAt) || b.task.id.localeCompare(a.task.id));

@@ -27,6 +27,15 @@ const nativeBootstrap: Bootstrap = {
   adapters: [...bootstrap.adapters, { id: 'codex-app-server', name: 'Codex AppServer', description: '原生审批测试夹具', available: true, kind: 'cli' }],
 };
 
+const hermesBootstrap: Bootstrap = {
+  ...bootstrap,
+  adapters: [...bootstrap.adapters, { id: 'hermes', name: 'Hermes Agent', description: '本机协议测试夹具', available: true, kind: 'http' }],
+};
+const claudeBootstrap: Bootstrap = {
+  ...bootstrap,
+  adapters: bootstrap.adapters.map(adapter => adapter.id === 'claude' ? { ...adapter, name: 'Claude Agent', description: 'SDK 离线测试夹具', available: true } : adapter),
+};
+
 function makeNativeSession(id: string, approvalOverrides: Partial<NativeApproval> = {}): Session {
   const session = makeSession(id, `原生会话 ${id}`, 'codex-app-server');
   session.engineBinding = { driverId: 'codex-app-server', threadId: `thread-${id}`, workspace: '/workspace/relaydesk', version: '0.162.1' };
@@ -41,6 +50,12 @@ function makeNativeSession(id: string, approvalOverrides: Partial<NativeApproval
     events: [{ status: 'awaiting_approval', at: timestamp, detail: '原生执行等待审批' }],
   });
   session.messages.push({ id: `message-${id}`, role: 'user', content: session.tasks[0].prompt, createdAt: timestamp, taskId: session.tasks[0].id });
+  return session;
+}
+function makeClaudeSession(id: string): Session {
+  const session = makeNativeSession(id, { kind: 'tool', operation: 'Read project notes', allowedDecisions: ['accept', 'decline'] });
+  session.adapterId = 'claude'; session.tasks[0].adapterId = 'claude';
+  session.engineBinding = { driverId: 'claude', threadId: `thread-${id}`, workspace: '/workspace/relaydesk', version: 'offline-sdk' };
   return session;
 }
 
@@ -351,6 +366,92 @@ test('React DOM: configured real Codex selects CLI, blocks approval demo and wai
       .find((card) => card.querySelector('h3')?.textContent === 'Codex CLI');
     assert.equal(codexCard?.querySelector('.badge')?.textContent, '已配置 · exec');
     assert.match(codexCard?.textContent ?? '', /不代表本轮调用已成功/);
+  } finally { await ui.cleanup(); }
+});
+
+test('React DOM: Hermes is a distinct execution route and task result stays visible outside drawers', async () => {
+  const ui = await mount({ bootstrap: hermesBootstrap });
+  try {
+    await ui.click('[data-adapter-id="hermes"]');
+    assert.equal(ui.query('[data-testid="adapter-mode"]').textContent, '真实 · 本机任务');
+    assert.match(ui.query('[data-testid="adapter-notice"]').textContent ?? '', /这台电脑上的 Hermes/);
+    assert.doesNotMatch(ui.query('[data-testid="adapter-notice"]').textContent ?? '', /发送到官方 Codex/);
+    assert.equal(ui.dom.window.document.querySelector('[data-testid="approval-demo"]'), null);
+    await ui.type('汇总测试目录中的文件');
+    await ui.click('[data-testid="send-message"]');
+    const session = [...ui.sessions.values()][0];
+    assert.equal(session.adapterId, 'hermes');
+    assert.match(ui.query('[data-testid="task-overview"]').textContent ?? '', /汇总测试目录中的文件/);
+    session.tasks[0].status = 'cancelling';
+    await ui.publish(session);
+    assert.equal(ui.query('[data-testid="task-overview-status"]').textContent, '正在停止');
+    assert.match(ui.query('[data-testid="task-overview"]').textContent ?? '', /等待执行器确认结束/);
+    await ui.finish(session, '合成结果：共 3 个文件。');
+    const summary = ui.query('[data-testid="task-overview"]');
+    assert.equal(summary.closest('.drawer'), null);
+    assert.match(summary.textContent ?? '', /已完成.*结果.*共 3 个文件.*下一步/s);
+    assert.match(ui.query('.message-real').textContent ?? '', /真实 · 本机任务/);
+  } finally { await ui.cleanup(); }
+});
+
+test('React DOM: Claude Agent has its own SDK boundaries and sends a single native approval decision', async () => {
+  const ui = await mount({ bootstrap: claudeBootstrap, nativeDecision: 'deferred' });
+  try {
+    await ui.click('[data-adapter-id="claude"]');
+    assert.equal(ui.query('[data-testid="adapter-mode"]').textContent, '真实 · Agent SDK');
+    assert.equal(ui.dom.window.document.querySelector('[data-testid="approval-demo"]'), null);
+    assert.match(ui.query('[data-testid="adapter-notice"]').textContent ?? '', /官方 CLI 独立登录/);
+    assert.doesNotMatch(ui.query('[data-testid="adapter-notice"]').textContent ?? '', /Codex|已验证|订阅已通/);
+    assert.match(ui.query('.execution-boundary').textContent ?? '', /默认关闭工具/);
+    assert.match(ui.query('.execution-boundary').textContent ?? '', /文字、规划和代码问题/);
+    assert.match(ui.query('.execution-boundary').textContent ?? '', /只读文件检索工具/);
+    assert.match(ui.query('.execution-boundary').textContent ?? '', /未接入桌面点击、截图或远程桌面/);
+    await ui.type('帮我核对任务计划'); await ui.click('[data-testid="send-message"]');
+    const session = [...ui.sessions.values()][0];
+    Object.assign(session, makeClaudeSession(session.id)); await ui.publish(session);
+    assert.ok(ui.query('[aria-label="Claude Agent 操作审批与恢复"]'));
+    assert.match(ui.query('.native-eyebrow').textContent ?? '', /Claude Agent/);
+    assert.match(ui.query('.native-approval-footnote').textContent ?? '', /当前执行器不提供命令、文件写入或桌面控制工具/);
+    assert.doesNotMatch(ui.query('.native-eyebrow').textContent ?? '', /APPSERVER|HERMES/);
+    assert.equal(ui.dom.window.document.querySelector('[data-testid="native-cancel"]'), null);
+    await ui.click('[data-testid="native-approve"]'); await ui.click('[data-testid="native-approve"]');
+    const decisions = ui.requests.filter(request => request.path.includes('/native-approvals/'));
+    assert.deepEqual(decisions, [{ path: `/api/tasks/${session.tasks[0].id}/native-approvals/${session.tasks[0].nativeApprovals![0].id}`, method: 'POST', body: { decision: 'accept' } }]);
+    assert.equal(ui.requests.some(request => /^\/api\/tasks\/[^/]+\/approve$/.test(request.path)), false);
+    await ui.resolveNativeDecision();
+    assert.equal(ui.query('[data-testid="native-approval-status"]').getAttribute('data-status'), 'accepted');
+  } finally { await ui.cleanup(); }
+});
+
+test('React DOM: a lost Claude Agent approval response stays locked and only GET checks its status', async () => {
+  const session = makeClaudeSession('claude-lost-response');
+  const ui = await mount({ bootstrap: claudeBootstrap, sessions: [session], selected: session.id, nativeDecision: 'drop-response' });
+  try {
+    await ui.click('[data-testid="native-decline"]');
+    assert.equal(ui.query<HTMLButtonElement>('[data-testid="native-approve"]').disabled, true);
+    assert.equal(ui.query<HTMLButtonElement>('[data-testid="native-decline"]').disabled, true);
+    const before = ui.requests.length; await ui.click('[data-testid="native-check-state"]');
+    assert.ok(ui.requests.length > before);
+    assert.ok(ui.requests.slice(before).every(request => request.method === 'GET'));
+    await ui.click('[data-testid="native-decline"]');
+    assert.equal(ui.requests.filter(request => request.path.includes('/native-approvals/')).length, 1);
+    assert.match(ui.query('[aria-label="Claude Agent 操作审批与恢复"]').textContent ?? '', /不会自动重发|不会重复提交/);
+  } finally { await ui.cleanup(); }
+});
+
+test('React DOM: a Hermes accepted run can be inspected after disconnect before session binding was saved', async () => {
+  const session = makeSession('hermes-window', '已接收的任务', 'hermes');
+  session.tasks.push({ id: 'relay-task', sessionId: session.id, adapterId: 'hermes', prompt: '不重放', mode: 'chat', status: 'unknown', stopUnconfirmed: true, nativeTurnId: 'accepted-run', createdAt: timestamp, updatedAt: timestamp, events: [] });
+  const recovered = structuredClone(session);
+  recovered.tasks[0].status = 'completed';
+  delete recovered.tasks[0].stopUnconfirmed;
+  const ui = await mount({ bootstrap: hermesBootstrap, sessions: [session], selected: session.id, recoveredSession: recovered });
+  try {
+    assert.equal(ui.query('[data-testid="task-overview-status"]').textContent, '结果待确认');
+    assert.ok(ui.query<HTMLTextAreaElement>('#message-input').disabled);
+    await ui.click('[data-testid="native-recover"]');
+    assert.equal(ui.query('[data-testid="task-overview-status"]').textContent, '已完成');
+    assert.equal(ui.requests.filter(request => request.method === 'POST' && request.path.endsWith('/tasks')).length, 0);
   } finally { await ui.cleanup(); }
 });
 
